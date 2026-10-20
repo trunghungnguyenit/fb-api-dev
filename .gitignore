@@ -1,0 +1,20 @@
+node_modules
+.next
+out
+coverage
+.vercel
+
+# secrets: every .env* except the template
+.env*
+!.env.example
+
+*.log
+logs.txt
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+
+plans
+.claude
+lenh_claude.md
+repurposed
