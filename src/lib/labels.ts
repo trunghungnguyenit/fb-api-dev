@@ -10,8 +10,11 @@ export function formatDateTime(iso: string) {
   return new Date(iso).toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
 }
 
-export function statusLabel(status: string, deletedOnFacebook = false) {
+/** `phase`: a video / Reel that Facebook is still working on (publish_phase). */
+export function statusLabel(status: string, deletedOnFacebook = false, phase?: string | null) {
   if (deletedOnFacebook) return "Đã xóa trên Facebook";
+  if (status === "publishing" && phase === "processing") return "Facebook đang xử lý";
+  if (status === "publishing" && phase === "uploading") return "Đang tải lên Facebook";
   return STATUS_LABELS[status] ?? status;
 }
 
@@ -71,4 +74,15 @@ export function taskLabel(task: string) {
 export function truncate(text: string, max: number) {
   const chars = Array.from(text);
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : text;
+}
+
+const FEED_KINDS: Record<string, string> = {
+  added_photos: "Ảnh", added_video: "Video", shared_story: "Chia sẻ", mobile_status_update: "Bài viết", wall_post: "Bài viết",
+  published_story: "Bài viết", created_event: "Sự kiện", created_note: "Ghi chú", tagged_in_photo: "Gắn thẻ ảnh"
+};
+
+/** What kind of post this is, from Facebook's `status_type` and what is attached. */
+export function feedKindLabel(statusType: string | null, mediaCount: number) {
+  if (statusType && FEED_KINDS[statusType]) return FEED_KINDS[statusType];
+  return mediaCount > 1 ? "Nhiều ảnh" : mediaCount === 1 ? "Có đính kèm" : "Bài viết";
 }

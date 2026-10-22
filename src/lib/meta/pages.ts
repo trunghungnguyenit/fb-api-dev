@@ -1,5 +1,6 @@
 import { metaGet, MetaApiError, type MetaPage } from "@/lib/meta/client";
 import type { ErrorCode } from "@/lib/errors";
+import { isRateLimitCode, LOCAL_RATE_LIMIT_CODE } from "@/lib/meta/usage";
 
 const MAX_BATCHES = 50; // 50 x 100 = 5000 pages; beyond that we refuse rather than act on a partial list
 
@@ -38,8 +39,10 @@ export function describeMetaError(error: MetaApiError): ErrorCode {
   if (DEAD_TOKEN_CODES.has(error.code)) return "PAGE_PERMISSION_LOST";
   if (PERMISSION_DENIED_CODES.has(error.code)) return "FB_PERMISSION_DENIED";
   if (error.code === "368") return "FB_TEMP_BLOCKED";
-  if (["4", "17", "32", "613", "80001", "80006"].includes(error.code)) return "FB_RATE_LIMITED";
+  if (isRateLimitCode(error.code) || error.code === LOCAL_RATE_LIMIT_CODE) return "FB_RATE_LIMITED";
   if (error.code === "506") return "FB_DUPLICATE";
+  if (error.code === "389") return "FB_VIDEO_FETCH_FAILED"; // Facebook could not download the video from the link
+  if (["382", "6000", "6001"].includes(error.code)) return "FB_VIDEO_FAILED"; // file too small / upload problem
   if (["100", "120", "1500"].includes(error.code)) return "FB_CONTENT_REJECTED";
   if (["1", "2"].includes(error.code) || error.httpStatus >= 500) return "FB_UNAVAILABLE";
   return "FB_REJECTED";

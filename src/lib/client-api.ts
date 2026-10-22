@@ -10,6 +10,15 @@ export class ApiFailure extends UserError {
   }
 }
 
+/** Which form fields the server found wrong (field name -> message), if it said so. */
+export function fieldErrorsOf(e: unknown): Record<string, string> | null {
+  const fields = e instanceof ApiFailure ? (e.body as { fields?: unknown } | null)?.fields : null;
+  if (!fields || typeof fields !== "object") return null;
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) if (typeof value === "string") out[key] = value;
+  return Object.keys(out).length ? out : null;
+}
+
 export function userMessage(e: unknown) {
   return e instanceof UserError ? e.message : messageFor("UNEXPECTED");
 }

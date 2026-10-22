@@ -7,6 +7,13 @@
 - Đăng nhập bằng **Google** (Supabase Auth). Không dùng email/mật khẩu.
 - Kết nối Facebook, lưu token đã mã hóa (AES-256-GCM), tự đồng bộ danh sách Fanpage.
 - Soạn bài, lưu nháp, lên lịch, **Đăng ngay**, **Thử lại**, **Hủy**, **Nhân bản**.
+- **Ảnh, video và Reels**: bài có một hoặc nhiều ảnh (JPG/PNG/GIF), hoặc đúng một video (MP4/MOV) hoặc Reels (video dọc 9:16, 3–90 giây). Tệp được trình duyệt tải thẳng lên Supabase Storage (bucket riêng tư), server kiểm tra loại và dung lượng thật ở ba lớp (trước khi tải, sau khi tải và ngay trước khi đăng). Mặc định mỗi tệp tối đa 50 MB, ảnh 10 MB; chỉnh bằng các biến `MEDIA_*`. Video/Reels đăng ở nền và hiện "Facebook đang xử lý" cho đến khi lên Fanpage. Tệp được dọn sau 7 ngày kể từ khi đăng. Nhập hàng loạt cũng tạo được bài ảnh/video kèm tệp (xem mục bên dưới).
+- **Bài từ Facebook** (`/posts?source=facebook`): bản sao các bài trên Fanpage như Facebook đang hiển thị trong 7 ngày gần nhất (cả bài đăng trực tiếp trên Facebook lẫn bài do ứng dụng đăng, có nhãn "Đăng từ ứng dụng"). Mỗi Fanpage được đọc lại mỗi `FEED_SYNC_INTERVAL_MIN` phút (mặc định 5), ngay khi bạn mở danh sách bài mà dữ liệu cũ hơn 1 phút, hoặc bằng nút "Tải lại từ Facebook" (mỗi Fanpage tối đa một lần mỗi phút). Trang đang mở tự làm mới mỗi phút. Bài đăng trực tiếp trên Facebook chỉ để xem; ứng dụng không sửa, xóa hay đăng lại chúng.
+- **Bài bị xóa trên Facebook**: một bài chỉ được coi là đã xóa sau hai lần đọc liên tiếp không thấy nó (nút "Tải lại" tự đọc hai lần cách nhau 2 giây, nên một lần bấm là đủ). Với bài do ứng dụng đăng, trạng thái được chuyển sang bảng bài của ứng dụng: danh sách và trang chi tiết hiện nhãn "Đã xóa trên Facebook", kèm một thông báo trong chuông; nếu bài hiện lại thì nhãn tự gỡ. Bài ứng dụng đăng cũ hơn 7 ngày (ngoài cửa sổ đọc) được hỏi trực tiếp Facebook, mỗi ngày một lần.
+- **Bình luận**: trên trang chi tiết bài, đọc bình luận từ Facebook, trả lời, ẩn/hiện, xóa. Bình luận **không được lưu** trong ứng dụng; chỉ có nhật ký thao tác (không kèm chữ). Cần hai quyền `pages_read_user_content` và `pages_manage_engagement`.
+- **Thông báo trong ứng dụng** (chuông góc dưới bên phải, `/notifications`): đăng bài thất bại, kết quả chưa rõ, Fanpage mất quyền, kết nối cần xác thực lại, quyền truy cập dữ liệu sắp hết hạn, quyền bị thu hồi.
+- **Kiểm tra sức khỏe token** mỗi ~20 giờ bằng `debug_token`: cảnh báo trước 7/3/1 ngày khi quyền truy cập dữ liệu sắp hết hạn, phát hiện quyền bị thu hồi, hiện cảnh báo ở `/pages`.
+- **Tôn trọng giới hạn tốc độ của Meta**: đọc `X-App-Usage` / `X-Page-Usage`, làm chậm khi gần chạm và tạm dừng khi chạm; bài bị hoãn vì rate limit **không** bị đánh dấu thất bại. Đăng song song (mặc định 8 bài, không bao giờ hai bài cùng một Fanpage cùng lúc) để chịu được các đợt đăng hàng loạt.
 - Quản lý bài (`/posts`): lọc theo trạng thái / Fanpage, tìm theo nội dung, phân trang, chọn nhiều để hủy hoặc xóa hàng loạt (chỉ bài chưa đăng).
 - Trang chi tiết bài (`/posts/[id]`): nội dung đầy đủ, lịch sử từng lần đăng, nhật ký sửa/xóa, và số liệu sống từ Facebook (thích, bình luận, chia sẻ). Khi mở trang, ứng dụng tự phát hiện bài đã bị xóa trên Facebook và đánh dấu lại.
 - **Sửa bài**: bài chưa đăng sửa được mọi thông tin; bài **đã đăng** chỉ sửa được nội dung chữ (Facebook hiển thị nhãn "Đã chỉnh sửa"). Muốn đổi liên kết, Fanpage hay giờ thì nhân bản rồi đăng lại.
@@ -16,6 +23,20 @@
   - *Thay thế*: đăng bản mới trước, thành công rồi mới xóa bài cũ trên Facebook. Nếu Facebook từ chối vì trùng, ứng dụng hỏi có xóa bài cũ trước rồi đăng lại không.
   - Mỗi bài gốc chỉ được đăng lại tối đa 3 lần/24 giờ cho mỗi Fanpage. Mọi bản sao đều trỏ về bài gốc ban đầu và hiện trong mục "Đăng lại" của trang chi tiết.
   - Trong danh sách có thể chọn nhiều bài rồi *Đăng lại (tạo bản nháp)* hoặc *Đăng lại ngay*; bài còn trên Facebook bị bỏ qua.
+- **Nhập nhiều bài một lần** (`/posts/import`): tải lên CSV, Excel (.xlsx), JSON hoặc dán thẳng từ Excel/Google Sheets (tối đa 100 dòng và 1 MB mỗi lần). Nhận cả bài chữ, liên kết, **ảnh, nhiều ảnh, video và Reels**.
+  - Cột nhận: *Nội dung*, *Liên kết*, *Thời gian đăng* (dd/mm/yyyy hh:mm, giờ Việt Nam), *Fanpage* (tên hoặc ID, trống thì dùng Fanpage mặc định chọn trên form), *Ghi chú* (chỉ để quản lý, không đăng lên Facebook), *Loại bài* (tùy chọn), *Tệp đính kèm* (tên tệp; nhiều tệp cách nhau bằng `;`, `|` hoặc xuống dòng; JSON có thể ghi mảng). Có nút tải tệp mẫu CSV, Excel, JSON; dòng mẫu có tệp dùng tên giả, hãy đổi tên cho đúng tệp của bạn.
+  - Loại bài suy ra từ tệp: 1 ảnh, nhiều ảnh, hoặc 1 video. Chỉ ghi `reel` ở *Loại bài* thì video mới thành Reels. Bài ảnh/video không cần *Nội dung*. Không ghi liên kết cùng tệp; một bài không trộn ảnh với video; một tệp không thể vừa là video vừa là Reels trong cùng lần nhập.
+  - Có tệp thì ở bước nhập phải chọn đúng các tệp từ máy tính (tên tệp phải khớp với cột, kể cả đuôi `.jpg`, `.mp4`). Khi bấm **Nhập**, trình duyệt tải lên **mỗi tệp khác nhau một lần** vào bucket riêng tư (theo luồng liên kết ký sẵn như trên); máy chủ kiểm tra lại loại, dung lượng thật, giới hạn từng bài và của cả lần nhập. Một tệp dùng cho nhiều dòng chỉ tải một lần, các bài còn lại được sao chép tệp.
+  - Có giờ thì lên lịch, để trống thì lưu **nháp**; giờ đã qua bị báo lỗi dòng đó. Có thể bật *Dãn lịch tự động* để các dòng không có giờ được xếp lịch cách nhau 1 giờ, 3 giờ, 1 ngày… Bên trong, mọi bài được tạo làm nháp trước, gắn đủ tệp rồi mới lên lịch; lỗi giữa chừng thì cả lô được thu hồi cùng tệp.
+  - Luôn **xem trước** rồi mới nhập: dòng lỗi và dòng trùng (trong tệp hoặc đã có bài giống hệt trên cùng Fanpage, cùng tệp) được tô màu kèm lý do, chỉ các dòng hợp lệ được nhập, có thể tải báo cáo dòng lỗi. Việc nhập không đăng ngay bài nào.
+  - Mỗi lần nhập là một lô: xem ở `/posts/imports`, mở các bài của lô, và **hoàn tác** (xóa các bài nháp/đã lên lịch chưa đăng của lô; bài đã đăng được giữ). Sau khi hoàn tác, bản sao tệp dùng chung còn lại đến khi job dọn tệp chạy (sau 24 giờ).
+  - Trình duyệt đọc tệp dữ liệu và chỉ gửi các dòng dạng văn bản lên máy chủ; tệp ảnh/video tải thẳng lên Storage. Máy chủ kiểm tra lại từng dòng và từng tệp.
+- **Gỡ Fanpage** (`/pages`, nút "Gỡ" từng Fanpage): ngắt kết nối một Fanpage khỏi ứng dụng nhưng **giữ lịch sử bài**.
+  - Hộp thoại cho biết trước tác động: bao nhiêu bài chưa đăng sẽ bị hủy (nháp, đã lên lịch, lỗi), bao nhiêu bài đã đăng được giữ lịch sử.
+  - Token đã lưu của Fanpage bị xóa. Các bài chưa đăng chuyển sang "Đã hủy" kèm lý do "Đã hủy do gỡ Fanpage" (muốn đăng lại dùng nút "Đăng lại"); bài chưa rõ kết quả được giữ nguyên vì có thể đã lên Facebook.
+  - Fanpage đã gỡ **không tự quay lại** khi bấm "Kết nối Facebook", "Kiểm tra lại quyền" hay khi job kiểm tra chạy hằng ngày. Muốn dùng lại, mở mục "Fanpage đã gỡ" và bấm "Kết nối lại" (cần Facebook vẫn cho tài khoản của bạn quản lý Fanpage đó). Fanpage đã gỡ và không còn bài nào có nút "Xóa hẳn".
+  - Sau khi gỡ, ứng dụng chưa xem số liệu, sửa hoặc xóa trên Facebook được các bài đã đăng của Fanpage đó cho đến khi kết nối lại.
+  - Facebook không có API thu hồi quyền riêng từng Fanpage: ứng dụng chỉ xóa dữ liệu của mình. Muốn thu hồi hoàn toàn, vào Facebook → Cài đặt → Ứng dụng và trang web.
 - **Xóa bài**: bài chưa đăng xóa hẳn khỏi ứng dụng; bài đã đăng được xóa trên Facebook (không hoàn tác) và ứng dụng giữ lại bản ghi để đối soát. Nếu Facebook từ chối xóa qua API, hãy xóa tay trên Facebook rồi bấm "Đánh dấu đã xóa".
 - Hàng đợi có khóa nguyên tử, lịch sử từng lần đăng (`publish_attempts`).
 - Tự tắt Fanpage mất quyền; bài đã lên lịch của Fanpage đó **vẫn nằm trong hàng đợi** và tự đăng khi bạn kết nối lại Facebook.
@@ -23,10 +44,13 @@
 
 ## Giới hạn cần biết
 
-- Chỉ đăng lên **Page**, không đăng lên trang cá nhân. Hiện hỗ trợ bài chữ và liên kết (`POST /{page-id}/feed`), chưa có ảnh/video.
-- Meta có thể yêu cầu duyệt ứng dụng (App Review) và chế độ **Live** trước khi người ngoài vai trò app dùng được `pages_manage_posts`.
+- Chỉ đăng lên **Page**, không đăng lên trang cá nhân. Hỗ trợ bài chữ, liên kết, ảnh, video và Reels.
+- Ứng dụng Meta đang ở chế độ **Development** với **Standard Access**: chỉ người có vai trò trong app dùng được. Để phục vụ khách ngoài cần App Review (Advanced Access), có thể cả Business Verification, rồi chuyển **Live**: xem [plans/A1/launch-readiness.md](plans/A1/launch-readiness.md).
+- Reels: Facebook cho đăng tối đa 30 Reels/24 giờ/Fanpage qua API; server không kiểm tra tỉ lệ khung hình hay độ dài video, Facebook sẽ từ chối sau khi xử lý nếu không phù hợp.
+- Bình luận và đồng bộ bài **không real-time** (cần webhook, chưa làm: xem [plans/A1/webhook-design.md](plans/A1/webhook-design.md)).
 - **Sửa/xóa bài đã đăng phụ thuộc Meta:** tài liệu của Meta mâu thuẫn về việc xóa qua API. Hãy thử trên một Fanpage thử trước khi dùng cho Fanpage thật. Chỉ sửa/xóa được bài do ứng dụng này đăng, và bài ở trạng thái "chưa rõ kết quả" (không có mã bài trên Facebook) thì phải xử lý tay.
 - Khi mạng hoặc Facebook lỗi giữa chừng, kết quả có thể **chưa rõ** (`AMBIGUOUS`): bài có thể đã lên. Hệ thống không tự đăng lại; hãy kiểm tra Fanpage rồi mới bấm "Thử lại".
+- Nhập bài có tệp: mỗi người dùng chỉ có tối đa 60 tệp tải lên chưa thuộc bài nào tại một thời điểm, nên chia lô lớn thành nhiều lần nhập. Hoàn tác một lô để lại bản sao tệp dùng chung đến khi job dọn tệp chạy.
 
 ## 1. Yêu cầu
 
@@ -49,6 +73,8 @@ openssl rand -hex 32   # dùng cho APP_ENCRYPTION_KEY (đúng 64 ký tự hex)
 openssl rand -hex 32   # dùng cho CRON_SECRET
 ```
 
+Khóa mã hóa token có thể xoay mà không mất dữ liệu: xem mục 11.
+
 Ứng dụng từ chối khởi động nếu còn giá trị mẫu (`replace-…`), nếu `META_OAUTH_REDIRECT_URI` không cùng origin với `NEXT_PUBLIC_APP_URL`, hoặc không kết thúc bằng `/api/auth/facebook/callback`.
 
 > `SUPABASE_SERVICE_ROLE_KEY` phải là khóa **service_role** (hoặc secret key `sb_secret_…`), **không phải** khóa `anon`. Khóa anon sẽ bị RLS chặn mọi thao tác ghi.
@@ -57,7 +83,7 @@ openssl rand -hex 32   # dùng cho CRON_SECRET
 
 Mở Supabase → SQL Editor và chạy toàn bộ [supabase/schema.sql](supabase/schema.sql).
 
-File chạy lại được nhiều lần: chạy lại mỗi khi cập nhật code làm thay đổi schema (ví dụ cột `posts.sent_at`, `posts.edited_at`, `posts.facebook_deleted_at`, `posts.reposted_from`, bảng `post_events`). Nó cũng tạo ràng buộc để dữ liệu của mỗi người dùng không thể gắn nhầm sang người khác, và chặn đọc token / ghi trạng thái bài trực tiếp bằng khóa `anon`.
+File chạy lại được nhiều lần: chạy lại mỗi khi cập nhật code làm thay đổi schema (ví dụ các cột mới của `posts` và `facebook_pages`, các bảng `post_events`, `import_batches`, `notifications`, `post_media`, `page_feed_posts`, `comment_actions` và các hàm SQL `find_duplicate_posts`, `import_batch_stats`, `page_post_counts`). Nếu chưa chạy, ứng dụng hiện màn hình "Cần cập nhật cơ sở dữ liệu" thay vì báo lỗi khó hiểu. Nó cũng tạo ràng buộc để dữ liệu của mỗi người dùng không thể gắn nhầm sang người khác, và chặn đọc token / ghi trạng thái bài trực tiếp bằng khóa `anon`.
 
 ## 4. Đăng nhập Google
 
@@ -71,10 +97,25 @@ Mọi tài khoản Google đều có thể đăng nhập; mỗi tài khoản là
 
 1. Tạo app tại https://developers.facebook.com/apps/ và thêm sản phẩm Facebook Login.
 2. Đặt *Valid OAuth Redirect URIs* đúng bằng `META_OAUTH_REDIRECT_URI`.
-3. Quyền cần dùng: `pages_show_list`, `pages_read_engagement`, `pages_manage_posts`. Nếu người dùng bỏ chọn `pages_show_list` hoặc `pages_manage_posts` ở màn hình cấp quyền, kết nối bị từ chối với thông báo rõ ràng.
+3. Quyền được xin khi đăng nhập Facebook: `pages_show_list`, `pages_manage_posts`, `pages_read_engagement`, `pages_read_user_content`, `pages_manage_engagement`. Chỉ hai quyền đầu là **bắt buộc**: nếu người dùng bỏ chọn một trong hai, kết nối bị từ chối với thông báo rõ ràng. Ba quyền còn lại là tùy chọn; thiếu thì chỉ tính năng tương ứng (số liệu, bình luận) bị khóa và `/pages` nhắc cấp thêm. Người dùng cũ cần bấm "Kết nối Facebook" lại để cấp quyền mới.
 4. Tài khoản Facebook phải có quyền tạo nội dung trên Page (task `CREATE_CONTENT`).
 
-## 6. Chạy
+## 6. Lưu trữ ảnh và video
+
+Tệp ảnh/video nằm trong bucket Supabase Storage **riêng tư** `post-media` (không bao giờ công khai; Facebook và trình duyệt chỉ dùng liên kết tạm). Tạo hoặc cập nhật bucket từ cấu hình:
+
+```bash
+npm run media:sync-bucket              # tạo bucket nếu chưa có, giữ riêng tư, đặt giới hạn dung lượng và loại tệp
+npm run media:sync-bucket -- --dry-run # chỉ xem sẽ đổi gì
+```
+
+Giới hạn nằm ở một chỗ duy nhất, các biến `MEDIA_*` trong `.env` (xem `.env.example`). Đổi giới hạn thì sửa biến rồi chạy lại lệnh trên. Giới hạn bucket không thể vượt giới hạn upload toàn cục của gói Supabase (50 MB ở gói Free).
+
+Riêng *Nhập nhiều bài có tệp* có hai biến: `MEDIA_IMPORT_MAX_FILES` (mặc định 50, tối đa 60: số tệp khác nhau một lần nhập được tải lên) và `MEDIA_IMPORT_MAX_TOTAL_MB` (mặc định 500: tổng dung lượng). Hai biến này không thuộc bucket nên đổi xong chỉ cần khởi động lại, không cần chạy `media:sync-bucket`. Giới hạn 100 dòng và 1 MB mỗi tệp dữ liệu không đổi.
+
+Các lệnh trong `scripts/` (`media:sync-bucket`, `reencrypt`) cần **Node 22.18 trở lên** vì chạy thẳng file TypeScript.
+
+## 7. Chạy
 
 ```bash
 npm run dev      # phát triển
@@ -85,9 +126,9 @@ npm run typecheck && npm run lint
 
 Mở http://localhost:3000 → **Đăng nhập bằng Google** → **Fanpage** → **Kết nối Facebook** → **Soạn bài**.
 
-## 7. Lập lịch đăng bài (chọn một cách)
+## 8. Lập lịch (chọn một cách)
 
-Bài đã lên lịch chỉ được đăng khi có thứ gì đó gọi hàng đợi. Chọn theo nơi bạn triển khai:
+Bài đã lên lịch chỉ được đăng khi có thứ gì đó gọi hàng đợi, và các việc nền khác (đọc bài từ Facebook, theo dõi video đang xử lý, dọn tệp) cũng cần được gọi. Chọn theo nơi bạn triển khai:
 
 **A. Server chạy liên tục** (VPS, Docker, `next start`): đặt trong `.env`
 
@@ -95,14 +136,16 @@ Bài đã lên lịch chỉ được đăng khi có thứ gì đó gọi hàng �
 INTERNAL_SCHEDULER=true
 ```
 
-Một bộ lập lịch trong tiến trình sẽ đăng bài đến hạn mỗi 30 giây và kiểm tra quyền Fanpage mỗi giờ (mỗi kết nối chỉ kiểm tra lại sau ~20 giờ). Khi chạy `npm run dev` bộ lập lịch này **luôn bật**, nên đừng trỏ `.env` dev vào dữ liệu production.
+Một bộ lập lịch trong tiến trình sẽ đăng bài đến hạn mỗi 30 giây (lượt nào hết thời gian mà vẫn còn bài thì chạy tiếp ngay), theo dõi video/Reels đang xử lý trong mỗi lượt đó, đọc bài từ Facebook mỗi phút (mỗi Fanpage chỉ mỗi `FEED_SYNC_INTERVAL_MIN` phút một lần, mặc định 5) và hỏi trực tiếp Facebook về vài bài cũ hơn 7 ngày (mỗi bài một lần mỗi ngày), kiểm tra quyền Fanpage và token mỗi giờ (mỗi kết nối chỉ ~20 giờ một lần) và dọn tệp mỗi giờ. Khi chạy `npm run dev` bộ lập lịch này **luôn bật**, nên đừng trỏ `.env` dev vào dữ liệu production.
 
 **B. Serverless (Vercel…)**: tiến trình không sống đủ lâu, hãy dùng bộ lập lịch bên ngoài gọi (GET hoặc POST) với header `Authorization: Bearer $CRON_SECRET`:
 
 | Endpoint | Tần suất gợi ý | Việc làm |
 |---|---|---|
-| `/api/cron/publish` | mỗi phút | đăng các bài đến hạn (dừng sau ~35 giây) |
-| `/api/cron/check-pages` | mỗi giờ | kiểm tra quyền Fanpage, tắt Page mất quyền |
+| `/api/cron/publish` | mỗi phút | đăng các bài đến hạn (dừng sau ~25 giây, kết quả có `stats.hasMore`: còn bài thì gọi lại ngay) và theo dõi video/Reels đang xử lý |
+| `/api/cron/sync-posts` | mỗi phút | đọc bài trên Facebook của các Fanpage đến lượt (mỗi `FEED_SYNC_INTERVAL_MIN` phút, mặc định 5), rồi kiểm tra vài bài app đăng cũ hơn 7 ngày còn trên Facebook không |
+| `/api/cron/check-pages` | mỗi giờ | kiểm tra quyền và token (`debug_token`), tắt Page mất quyền, cảnh báo sắp hết hạn |
+| `/api/cron/cleanup-media` | mỗi giờ | xóa tệp tải lên không dùng sau 24 giờ và tệp của bài đã đăng sau 7 ngày |
 
 ```bash
 curl -X POST https://your-domain/api/cron/publish -H "Authorization: Bearer $CRON_SECRET"
@@ -110,7 +153,7 @@ curl -X POST https://your-domain/api/cron/publish -H "Authorization: Bearer $CRO
 
 > Cron gói Hobby của Vercel chỉ chạy tối đa **một lần mỗi ngày**, không đủ cho bài đăng theo giờ. Dùng gói Pro hoặc một dịch vụ ping bên ngoài (GitHub Actions, cron-job.org…).
 
-## 8. Lỗi thường gặp
+## 9. Lỗi thường gặp
 
 | Hiện tượng | Nguyên nhân |
 |---|---|
@@ -120,14 +163,44 @@ curl -X POST https://your-domain/api/cron/publish -H "Authorization: Bearer $CRO
 | Lỗi `column … does not exist` / bảng không tồn tại | Chưa chạy lại `supabase/schema.sql` |
 | "Facebook không cho xóa bài này qua ứng dụng" | Meta hạn chế xóa qua API; xóa tay trên Facebook rồi bấm "Đánh dấu đã xóa" |
 | "Fanpage đang bị tắt" | Mất quyền; kết nối lại Facebook, bài trong hàng đợi sẽ tự đăng |
+| Màn hình "Cần cập nhật cơ sở dữ liệu" | Chưa chạy lại `supabase/schema.sql` sau khi cập nhật code; chi tiết cột còn thiếu có trong log |
+| Ảnh/video tải lên báo lỗi loại hoặc dung lượng | Vượt giới hạn `MEDIA_*`, hoặc tệp không đúng định dạng thật (ví dụ HTML đổi đuôi `.jpg`) |
+| Tải lên báo lỗi dù tệp nhỏ | Bucket chưa tạo: chạy `npm run media:sync-bucket` |
+| Video báo "Facebook không tải được tệp video" (lỗi 389) | Đặt `META_VIDEO_UPLOAD_MODE=binary` để server tự gửi dữ liệu |
+| Bài video/Reels ở "Facebook đang xử lý" lâu | Bình thường vài phút; quá 2 giờ ứng dụng báo "chưa rõ kết quả" để bạn kiểm tra Fanpage |
+| "Chưa cấp quyền quản lý bình luận" | Bấm "Kết nối Facebook" và tích đủ quyền; cần quyền Moderate trên Fanpage |
+| Nhập bài báo "Chưa chọn tệp …" | Tên trong cột *Tệp đính kèm* chưa khớp tệp đã chọn ở bước nhập (kiểm tra cả đuôi `.jpg`, `.mp4`) |
+| Tab "Từ Facebook" trống | Fanpage chưa có bài đăng trực tiếp trong 7 ngày, hoặc lần đồng bộ đầu chưa chạy; xem cột "Bài từ Facebook" ở `/pages` (có nút "Đồng bộ bài ngay") |
 
 Mỗi thông báo lỗi có "Mã tham chiếu": tìm mã đó trong log máy chủ để xem chi tiết kỹ thuật.
 
-## 9. Bảo mật
+## 10. Bảo mật
 
 - Không bao giờ đặt `NEXT_PUBLIC_` trước App Secret, Page token hay service-role key.
 - Mọi truy vấn của người dùng đi qua `userDb(userId)` (`src/lib/db.ts`) nên luôn có `user_id`; DB có thêm khóa ngoại kép và trigger chống đổi `user_id`.
 - OAuth `state` của Facebook gắn với người dùng (HMAC) và cookie HttpOnly; các thao tác ghi kiểm tra cùng nguồn (CSRF).
-- Có giới hạn mỗi người dùng: tối đa 500 bài nháp/đã lên lịch, 20 bài tạo mỗi phút.
+- Có giới hạn mỗi người dùng: tối đa 500 bài nháp/đã lên lịch, 20 bài tạo mỗi phút, 30 thao tác bình luận mỗi phút, 60 tệp tải lên chưa dùng.
+- Token Facebook mã hóa AES-256-GCM với **khóa có phiên bản** (xoay được); bucket tệp riêng tư, tệp được kiểm tra lại bằng nội dung thật; bình luận của người ngoài không được lưu.
+- Bảng `page_feed_posts` (bài đồng bộ từ Facebook) chỉ được ghi bởi `src/lib/feed-sync.ts`; có test quét mã nguồn để giữ điều này.
 - Token chỉ gửi qua header `Authorization`, không đưa vào URL hay log.
 - Dùng HTTPS ở production và đổi khóa định kỳ.
+
+## 11. Vận hành
+
+**Xoay khóa mã hóa token** (không mất dữ liệu): giữ `APP_ENCRYPTION_KEY` như cũ (được coi là khóa `1`), thêm khóa mới vào `APP_ENCRYPTION_KEYS` và đặt `APP_ENCRYPTION_KEY_ID` là khóa mới (xem `.env.example`), khởi động lại, rồi:
+
+```bash
+npm run reencrypt -- --report    # đếm số dòng theo từng khóa (không đổi gì)
+npm run reencrypt -- --dry-run   # xem sẽ chuyển những dòng nào
+npm run reencrypt                # mã hóa lại theo lô bằng khóa mới (chạy lại được, có thể dừng giữa chừng)
+```
+
+Chỉ gỡ khóa cũ khỏi `.env` khi `--report` cho thấy không còn dòng nào dùng nó.
+
+**Theo dõi hoạt động nền:** `/api/cron/publish` trả thống kê mỗi lượt (số bài đăng được, thất bại, bị hoãn, thời gian trung bình, lý do dừng); `/api/cron/sync-posts` trả số Fanpage đến lượt, đã đọc, lỗi; `/api/cron/cleanup-media` trả số tệp đã dọn. Mỗi Fanpage có trạng thái đồng bộ bài ở `/pages`.
+
+**Số lượng đồng thời:** `PUBLISH_CONCURRENCY` (mặc định 8) và `PUBLISH_HEAVY_CONCURRENCY` (mặc định 2, cho bài nhiều ảnh, video, Reels). Một Fanpage luôn đăng tuần tự.
+
+**Dữ liệu cá nhân:** bình luận của người ngoài không được lưu. Khi cần xóa toàn bộ dữ liệu của một người dùng, hiện phải làm thủ công trong Supabase (chưa có callback xóa dữ liệu của Meta: xem [plans/A1/launch-readiness.md](plans/A1/launch-readiness.md)).
+
+**Tài liệu kế hoạch:** [plans/A1/plan.md](plans/A1/plan.md) (các phase P0–P7, quyết định và những gì chưa kiểm chứng với Facebook thật), [plans/A1/launch-readiness.md](plans/A1/launch-readiness.md) (ra mắt cho khách ngoài), [plans/A1/webhook-design.md](plans/A1/webhook-design.md) (hướng phát triển webhook).

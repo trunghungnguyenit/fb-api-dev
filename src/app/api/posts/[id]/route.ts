@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
-import { one, userDb } from "@/lib/db";
+import { one, rows, userDb } from "@/lib/db";
+import type { MediaKind } from "@/lib/media/limits";
 import { AMBIGUOUS_CODE, processDuePosts } from "@/lib/publisher";
-import { apiError, failureResponse } from "@/lib/api-error";
+import { apiError, failureResponse, invalidFields } from "@/lib/api-error";
+import { messageFor } from "@/lib/errors";
 import { isSameOrigin } from "@/lib/csrf";
+import { applyMedia, MediaConflict, resolveMedia, type ResolvedMedia } from "@/lib/media/service";
+import { derivePostType } from "@/lib/media/rules";
 import {
   deleteFacebookPost, editFacebookMessage, FacebookActionError, isGoneOnFacebook, markFacebookGone, recordEvent
 } from "@/lib/facebook-posts";
@@ -20,27 +24,35 @@ const patchSchema = z.object({
   // Required to re-queue a post whose earlier publish outcome is unknown (it may already be live).
   force: z.boolean().optional(),
   // edit
-  message: z.string().trim().min(1).max(63206).optional(),
+  // May be empty only for a post that has images (checked in editUnpublished): a photo needs no caption.
+  message: z.string().trim().max(63206).optional(),
   linkUrl: z.string().url().refine((v) => /^https?:\/\//i.test(v)).optional().or(z.literal("")),
-  pageId: z.string().uuid().optional()
+  pageId: z.string().uuid().optional(),
+  // edit (not yet published only): the post's images, in order. Omitted = unchanged.
+  media: z.array(z.object({ id: z.string().uuid(), clone: z.boolean().optional() })).max(30).optional(),
+  // Private note, kept in this app only (empty string clears it). Editable in every state.
+  note: z.string().trim().max(500).optional()
 });
 type PatchInput = z.infer<typeof patchSchema>;
 
 const EDITABLE = ["draft", "scheduled", "failed"];
 const PAST_TOLERANCE_MS = 60_000;
 const uuid = z.string().uuid();
+// Field names as the edit form calls them (message, link, schedule, note, page, media).
+const FIELD_LABELS = { message: "Nội dung bài viết", linkUrl: "Liên kết", scheduledAt: "Thời gian đăng", note: "Ghi chú", pageId: "Fanpage", media: "Tệp đính kèm", action: "Thao tác" };
+const FIELD_NAMES = { linkUrl: "link", scheduledAt: "schedule", pageId: "page" };
 
-const COLUMNS = "id,page_id,message,link_url,status,scheduled_at,published_at,facebook_post_id,last_error_code,edited_at,facebook_deleted_at,created_at,updated_at";
+const COLUMNS = "id,page_id,message,link_url,status,post_type,scheduled_at,published_at,facebook_post_id,last_error_code,edited_at,facebook_deleted_at,note,import_batch_id,created_at,updated_at";
 
 type Existing = {
-  id: string; page_id: string; message: string; link_url: string | null; status: string;
+  id: string; page_id: string; message: string; link_url: string | null; status: string; post_type: string; note: string | null;
   last_error_code: string | null; facebook_post_id: string | null; facebook_deleted_at: string | null;
 };
 type Db = ReturnType<typeof userDb>;
 
 async function load(db: Db, id: string) {
   const { data, error } = await db.posts
-    .select("id,page_id,message,link_url,status,last_error_code,facebook_post_id,facebook_deleted_at").eq("id", id).maybeSingle();
+    .select("id,page_id,message,link_url,status,post_type,note,last_error_code,facebook_post_id,facebook_deleted_at").eq("id", id).maybeSingle();
   return { error, post: one<Existing>(data) };
 }
 
@@ -66,7 +78,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   const { id } = await context.params;
   if (!uuid.safeParse(id).success) return apiError("POST_NOT_FOUND", 404);
   const parsed = patchSchema.safeParse(await request.json().catch(() => null));
-  if (!parsed.success) return apiError("INVALID_REQUEST", 400);
+  if (!parsed.success) return invalidFields(parsed.error, FIELD_LABELS, FIELD_NAMES);
   const input = parsed.data;
   const db = userDb(user.id);
 
@@ -98,7 +110,7 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
   } else if (input.publishNow) {
     update = { status: "scheduled", scheduled_at: new Date(Date.now() - 1000).toISOString(), last_error_code: null, last_error_message: null };
   } else if (input.scheduledAt) {
-    if (isPast(input.scheduledAt)) return apiError("SCHEDULE_IN_PAST", 400);
+    if (isPast(input.scheduledAt)) return apiError("SCHEDULE_IN_PAST", 400, { fields: { schedule: messageFor("SCHEDULE_IN_PAST") } });
     update = { status: "scheduled", scheduled_at: input.scheduledAt, last_error_code: null, last_error_message: null };
   } else {
     return apiError("SCHEDULE_REQUIRED", 400);
@@ -126,6 +138,7 @@ async function editUnpublished(db: Db, existing: Existing, input: PatchInput) {
   const patch: Record<string, unknown> = {};
   if (input.message !== undefined) patch.message = input.message;
   if (input.linkUrl !== undefined) patch.link_url = input.linkUrl || null;
+  if (input.note !== undefined) patch.note = input.note || null;
 
   if (input.pageId !== undefined && input.pageId !== existing.page_id) {
     const { data, error } = await db.pages.select("id").eq("id", input.pageId).eq("is_active", true).maybeSingle();
@@ -136,6 +149,33 @@ async function editUnpublished(db: Db, existing: Existing, input: PatchInput) {
     if (existing.last_error_code === "PAGE_INACTIVE") { patch.last_error_code = null; patch.last_error_message = null; }
   }
 
+  // Images and link/caption rules: a post with images has no link, and may have no caption only if it has images.
+  const linkChanged = input.linkUrl !== undefined;
+  const effectiveLink = linkChanged ? input.linkUrl || null : existing.link_url;
+  let resolved: { ok: true; value: ResolvedMedia } | null = null;
+  let kinds: { kind: MediaKind }[] | null = null; // what the post will contain (null = media not looked at)
+  try {
+    if (input.media !== undefined) {
+      const result = await resolveMedia(db, input.media, { linkUrl: effectiveLink, ownPostId: existing.id });
+      if (!result.ok) return apiError(result.problem.code, result.problem.status, { message: result.problem.message });
+      resolved = result;
+      kinds = result.value.rows;
+    } else if (linkChanged || input.message !== undefined) {
+      const { data: current, error: kindsError } = await db.media.select("kind").eq("post_id", existing.id);
+      if (kindsError) throw kindsError;
+      kinds = rows<{ kind: MediaKind }>(current);
+    }
+  } catch (e) {
+    return apiError("DB_ERROR", 500, { detail: e });
+  }
+  if (kinds !== null) {
+    if (kinds.length > 0 && effectiveLink) return apiError("MEDIA_WITH_LINK", 400);
+    if (!(input.message ?? existing.message) && kinds.length === 0) {
+      return apiError("INVALID_REQUEST", 400, { message: "Nội dung bài viết không được để trống (trừ khi bài có ảnh).", fields: { message: "Nhập nội dung bài viết (hoặc giữ ít nhất một ảnh/video)." } });
+    }
+    patch.post_type = derivePostType({ linkUrl: effectiveLink, media: kinds });
+  }
+
   if (input.scheduledAt) {
     if (isPast(input.scheduledAt)) return apiError("SCHEDULE_IN_PAST", 400);
     if (existing.last_error_code === AMBIGUOUS_CODE && !input.force) return apiError("AMBIGUOUS", 409);
@@ -144,10 +184,36 @@ async function editUnpublished(db: Db, existing: Existing, input: PatchInput) {
   }
   if (!Object.keys(patch).length) return apiError("INVALID_REQUEST", 400);
 
+  // Changing the images of a QUEUED post: take it out of the queue (scheduled -> draft, guarded like a claim) while its
+  // files change, so the scheduler cannot pick it up half way. The update below puts it back.
+  let guardStatus = existing.status;
+  if (resolved && existing.status === "scheduled") {
+    const { data: locked, error: lockError } = await db.posts.update({ status: "draft", updated_at: new Date().toISOString() })
+      .eq("id", existing.id).eq("status", "scheduled").select("id");
+    if (lockError) return apiError("DB_ERROR", 500, { detail: lockError });
+    if (!locked?.length) return apiError("POST_LOCKED", 409);
+    guardStatus = "draft";
+    patch.status = "scheduled";
+  }
+  const putBack = async () => {
+    if (guardStatus !== existing.status) await db.posts.update({ status: existing.status }).eq("id", existing.id).eq("status", "draft");
+  };
+
+  if (resolved) {
+    try { await applyMedia(db, existing.id, resolved.value); }
+    catch (e) {
+      // Make the post's type match the images it really has before reporting the failure.
+      await putBack();
+      const { data: now } = await db.media.select("kind").eq("post_id", existing.id);
+      await db.posts.update({ post_type: derivePostType({ linkUrl: existing.link_url, media: rows<{ kind: MediaKind }>(now) }) }).eq("id", existing.id);
+      return e instanceof MediaConflict ? apiError("MEDIA_IN_USE", 409) : apiError("DB_ERROR", 500, { detail: e });
+    }
+  }
+
   // Guard on the status we read: the scheduler may have claimed the post since.
   const { data, error } = await db.posts.update({ ...patch, updated_at: new Date().toISOString() })
-    .eq("id", existing.id).eq("status", existing.status).select(COLUMNS).maybeSingle();
-  if (error) return apiError("DB_ERROR", 500, { detail: error });
+    .eq("id", existing.id).eq("status", guardStatus).select(COLUMNS).maybeSingle();
+  if (error) { await putBack(); return apiError("DB_ERROR", 500, { detail: error }); }
   if (!data) return apiError("POST_LOCKED", 409);
   return NextResponse.json({ post: data });
 }
@@ -158,13 +224,26 @@ async function editPublished(db: Db, userId: string, existing: Existing, input: 
   const changesOtherFields =
     (input.linkUrl !== undefined && (input.linkUrl || null) !== existing.link_url) ||
     (input.pageId !== undefined && input.pageId !== existing.page_id) ||
-    Boolean(input.scheduledAt);
+    Boolean(input.scheduledAt) ||
+    input.media !== undefined; // Facebook does not let a published post's images change
   if (changesOtherFields) return apiError("EDIT_PUBLISHED_FIELDS", 400);
-  if (input.message === undefined) return apiError("INVALID_REQUEST", 400);
-  if (input.message === existing.message) return apiError("EDIT_NO_CHANGE", 400);
+  if (input.message === undefined && input.note === undefined) return apiError("INVALID_REQUEST", 400);
+  if (input.message === "") return apiError("INVALID_REQUEST", 400); // the text of a post on Facebook is never emptied from here
+  const messageChanged = input.message !== undefined && input.message !== existing.message;
+  const noteChanged = input.note !== undefined && (input.note || null) !== (existing.note ?? null);
+  if (!messageChanged && !noteChanged) return apiError("EDIT_NO_CHANGE", 400);
+
+  // Only the private note changed: nothing to tell Facebook.
+  if (!messageChanged) {
+    const { data, error } = await db.posts.update({ note: input.note || null, updated_at: new Date().toISOString() })
+      .eq("id", existing.id).select(COLUMNS).maybeSingle();
+    if (error) return apiError("DB_ERROR", 500, { detail: error });
+    return NextResponse.json({ post: data });
+  }
+  const newMessage = input.message as string;
 
   try {
-    await editFacebookMessage(userId, existing, input.message);
+    await editFacebookMessage(userId, existing, newMessage);
   } catch (e) {
     const failure = e instanceof FacebookActionError ? e : new FacebookActionError("UNEXPECTED", false, e);
     if (failure.gone) {
@@ -175,7 +254,9 @@ async function editPublished(db: Db, userId: string, existing: Existing, input: 
     return failureResponse(failure.code, failure.cause);
   }
 
-  const saved = await writeAfterFacebook(db, existing.id, { message: input.message, edited_at: new Date().toISOString() });
+  const saved = await writeAfterFacebook(db, existing.id, {
+    message: newMessage, edited_at: new Date().toISOString(), ...(noteChanged ? { note: input.note || null } : {})
+  });
   await recordEvent(userId, existing.id, "edited", saved ? null : "DB_ERROR");
   if (!saved) return failureResponse("DB_ERROR", "edit applied on Facebook but not saved locally");
   const { data } = await db.posts.select(COLUMNS).eq("id", existing.id).maybeSingle();

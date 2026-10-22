@@ -6,7 +6,7 @@ coverage
 
 # secrets: every .env* except the template
 .env*
-!.env.example
+.env.example*
 
 *.log
 logs.txt
@@ -18,3 +18,4 @@ plans
 .claude
 lenh_claude.md
 repurposed
+docs

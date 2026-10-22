@@ -3,6 +3,7 @@ import { env } from "@/lib/env";
 import { requireUser } from "@/lib/auth";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { messageFor } from "@/lib/errors";
+import { IconFeather } from "@/app/icons";
 
 export const dynamic = "force-dynamic";
 
@@ -23,12 +24,13 @@ async function signInWithGoogle() {
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   if (await requireUser()) redirect("/");
   const { error } = await searchParams;
-  return <main className="shell"><section className="panel" style={{ maxWidth: 420, margin: "0 auto" }}>
+  return <main className="shell login-shell"><section className="panel login-panel">
+    <div className="nav-logo" aria-hidden="true"><IconFeather /></div>
     <h1 className="brand">Page Publisher</h1>
     <p className="subtle">Đăng nhập bằng tài khoản Google để quản lý bài đăng Facebook.</p>
     {error && <p className="error" role="alert">{messageFor("LOGIN_FAILED")}</p>}
     <form action={signInWithGoogle}>
-      <button className="btn primary" type="submit" style={{ width: "100%" }}>Đăng nhập bằng Google</button>
+      <button className="btn primary" type="submit">Đăng nhập bằng Google</button>
     </form>
   </section></main>;
 }

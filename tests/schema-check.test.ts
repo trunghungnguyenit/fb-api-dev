@@ -7,6 +7,8 @@ describe("isMissingSchemaError", () => {
     expect(isMissingSchemaError({ code: "42P01" })).toBe(true); // undefined_table
     expect(isMissingSchemaError({ code: "PGRST204" })).toBe(true); // column not in schema cache
     expect(isMissingSchemaError({ code: "PGRST205" })).toBe(true); // table not in schema cache
+    expect(isMissingSchemaError({ code: "42883" })).toBe(true); // undefined_function
+    expect(isMissingSchemaError({ code: "PGRST202" })).toBe(true); // function not in schema cache
   });
 
   it("does not mistake other failures for an outdated schema", () => {

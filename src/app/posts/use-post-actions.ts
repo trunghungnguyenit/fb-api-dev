@@ -2,8 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { callApi, userMessage } from "@/lib/client-api";
+import { useConfirm } from "@/app/confirm-dialog";
+import { callApi, fieldErrorsOf, userMessage } from "@/lib/client-api";
 import { messageFor } from "@/lib/errors";
+import { checkSchedule } from "@/lib/field-errors";
 
 export type PostAction = "publish" | "schedule" | "cancel";
 
@@ -15,17 +17,24 @@ export function usePostActions({ id, lastErrorCode }: { id: string; lastErrorCod
   const router = useRouter();
   const [busy, setBusy] = useState<PostAction | null>(null);
   const [error, setError] = useState("");
+  /** What is wrong with the chosen schedule time (shown under the time box). */
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const confirm = useConfirm();
   // A post whose outcome is unknown may already be on Facebook: re-queuing needs an explicit confirmation.
   const ambiguous = lastErrorCode === "AMBIGUOUS";
 
   async function run(action: PostAction, whenLocal?: string): Promise<boolean> {
-    setError("");
+    setError(""); setScheduleError(null);
     if (action === "schedule") {
-      if (!whenLocal) { setError("Hãy chọn thời gian đăng."); return false; }
-      if (new Date(whenLocal).getTime() < Date.now() - 60_000) { setError(messageFor("SCHEDULE_IN_PAST")); return false; }
+      const wrong = checkSchedule(whenLocal ?? "", Date.now(), { required: true });
+      if (wrong) { setScheduleError(wrong); return false; }
     }
     const needsForce = ambiguous && action !== "cancel";
-    if (needsForce && !window.confirm("Chưa rõ bài này đã được đăng lên Facebook hay chưa. Hãy kiểm tra Fanpage trước. Vẫn muốn đăng lại?")) return false;
+    if (needsForce && !(await confirm({
+      title: "Chưa rõ bài đã được đăng chưa",
+      message: "Chưa rõ bài này đã được đăng lên Facebook hay chưa. Hãy kiểm tra Fanpage trước.\nVẫn muốn đăng lại?",
+      confirmLabel: "Vẫn đăng lại", cancelLabel: "Để tôi kiểm tra", tone: "danger"
+    }))) return false;
 
     setBusy(action);
     try {
@@ -38,10 +47,11 @@ export function usePostActions({ id, lastErrorCode }: { id: string; lastErrorCod
       router.refresh();
       return true;
     } catch (e) {
-      setError(userMessage(e));
+      const fields = fieldErrorsOf(e);
+      if (fields?.schedule) setScheduleError(fields.schedule); else setError(userMessage(e));
       return false;
     } finally { setBusy(null); }
   }
 
-  return { busy, error, run };
+  return { busy, error, scheduleError, clearScheduleError: () => setScheduleError(null), run };
 }

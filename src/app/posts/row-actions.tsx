@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { FieldError, invalidProps } from "@/app/form-field";
+import { IconEye, IconRepeat, IconSend } from "@/app/icons";
 import { usePostActions } from "./use-post-actions";
 
 type Props = { id: string; status: string; lastErrorCode: string | null; canRepost: boolean; editable: boolean };
 type MenuPosition = { top?: number; bottom?: number; right: number };
 
-// Compact controls for one row of the posts list: "Chi tiết", one primary action, and a "⋯" menu with the rest.
+// Compact controls for one row of the posts list: "Xem chi tiết", then one primary action (publish / retry / re-post), and a "⋯" menu with the rest.
 export default function RowActions({ id, status, lastErrorCode, canRepost, editable }: Props) {
-  const { busy, error, run } = usePostActions({ id, lastErrorCode });
+  const { busy, error, scheduleError, clearScheduleError, run } = usePostActions({ id, lastErrorCode });
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition>({ right: 0 });
   const [scheduling, setScheduling] = useState(false);
@@ -58,11 +60,11 @@ export default function RowActions({ id, status, lastErrorCode, canRepost, edita
   const disabled = busy !== null;
   return <div className="row-actions">
     <div className="row-actions-line">
-      <Link className="btn small" href={`/posts/${id}`}>Chi tiết</Link>
+      <Link className="btn small" href={`/posts/${id}`}><IconEye />Xem chi tiết</Link>
       {canPublish && <button className="btn small primary" type="button" disabled={disabled} onClick={() => void run("publish")}>
-        {busy === "publish" ? "Đang đăng…" : status === "failed" ? "Thử lại" : "Đăng ngay"}
+        {status === "failed" ? <IconRepeat /> : <IconSend />}{busy === "publish" ? "Đang đăng…" : status === "failed" ? "Thử lại" : "Đăng ngay"}
       </button>}
-      {primaryRepost && <Link className="btn small primary" href={`/posts/${id}/repost`}>Đăng lại</Link>}
+      {primaryRepost && <Link className="btn small primary" href={`/posts/${id}/repost`}><IconRepeat />Đăng lại</Link>}
       {hasMenu && <button ref={buttonRef} className="btn small icon" type="button" aria-haspopup="menu" aria-expanded={open}
         aria-label="Thêm thao tác" disabled={disabled} onClick={toggle}>⋯</button>}
     </div>
@@ -72,7 +74,8 @@ export default function RowActions({ id, status, lastErrorCode, canRepost, edita
       {canRepost && canPublish && <Link role="menuitem" className="row-menu-item" href={`/posts/${id}/repost`}>Đăng lại…</Link>}
       {status === "draft" && (scheduling
         ? <div className="row-menu-form">
-            <input type="datetime-local" aria-label="Thời gian đăng" value={when} onChange={(e) => setWhen(e.target.value)} disabled={disabled} />
+            <input id={`schedule-${id}`} type="datetime-local" aria-label="Thời gian đăng (giờ của bạn)" value={when} onChange={(e) => { setWhen(e.target.value); clearScheduleError(); }} disabled={disabled} {...invalidProps(`schedule-${id}`, scheduleError)} />
+            <FieldError id={`schedule-${id}`} message={scheduleError} />
             <button className="btn small primary" type="button" disabled={disabled}
               onClick={async () => { if (await run("schedule", when)) setOpen(false); }}>
               {busy === "schedule" ? "Đang lưu…" : "Lưu lịch"}

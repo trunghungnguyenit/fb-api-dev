@@ -6,6 +6,7 @@ import { one, rows, userDb } from "@/lib/db";
 import { AppFailure } from "@/lib/errors";
 import { isLiveOnFacebook, REPOST_LIMIT_PER_DAY, repostModes } from "@/lib/repost";
 import { statusLabel } from "@/lib/labels";
+import { mediaOfPosts } from "@/lib/media/service";
 import RepostForm from "./repost-form";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,7 @@ export default async function RepostPage({ params }: { params: Promise<{ id: str
   const post = one<Source>(postResult.data);
   if (!post) notFound();
 
+  const images = (await mediaOfPosts(db, [post.id])).get(post.id) ?? [];
   const modes = repostModes(post);
   const pages = rows<{ id: string; page_name: string }>(pagesResult.data);
 
@@ -61,6 +63,7 @@ export default async function RepostPage({ params }: { params: Promise<{ id: str
         sourcePageId={post.page_id}
         initial={{ message: post.message, linkUrl: post.link_url ?? "" }}
         pages={pages}
+        imageCount={images.length}
       />
     </section>
   </main>;

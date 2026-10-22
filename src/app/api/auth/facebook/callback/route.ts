@@ -5,7 +5,9 @@ import { requireUser } from "@/lib/auth";
 import { encryptSecret } from "@/lib/crypto";
 import { userDb } from "@/lib/db";
 import { logError, newRef, type ErrorCode } from "@/lib/errors";
+import { inspectConnection } from "@/lib/connection-health";
 import { metaGet } from "@/lib/meta/client";
+import { hasScopes, requiredScopes } from "@/lib/meta/scopes";
 import { verifyOAuthState } from "@/lib/oauth-state";
 import { fetchAllManagedPages } from "@/lib/meta/pages";
 import { syncConnectionPages } from "@/lib/page-sync";
@@ -82,7 +84,7 @@ export async function GET(request: NextRequest) {
     // refuse a connection that could never publish (it would list Pages, then fail on every post).
     const permissions = await metaGet<{ data?: { permission: string; status: string }[] }>("me/permissions", userToken);
     const granted = (permissions.data ?? []).filter((p) => p.status === "granted").map((p) => p.permission);
-    if (!granted.includes("pages_show_list") || !granted.includes("pages_manage_posts")) return backWithError("FB_SCOPES_MISSING");
+    if (!hasScopes(granted, requiredScopes())) return backWithError("FB_SCOPES_MISSING");
 
     // Complete list (cursor pagination); a partial list would wrongly deactivate Pages below.
     const pages = await fetchAllManagedPages(userToken);
@@ -93,10 +95,16 @@ export async function GET(request: NextRequest) {
       user_token_encrypted: encryptSecret(userToken),
       token_expires_at: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
       scopes: granted,
+      // A fresh token: whatever the last health check said about the previous one no longer applies.
+      token_is_valid: true,
+      token_checked_at: null,
+      data_access_expires_at: null,
       updated_at: new Date().toISOString()
     }, { onConflict: "user_id,meta_user_id" }).select("id").single();
 
     if (connectionError || !connection) return backWithError("DB_ERROR", connectionError);
+    // Record when this token's data access ends right away (best effort: the daily check does it otherwise).
+    await inspectConnection({ id: connection.id, user_id: user.id, meta_user_name: me.name ?? null, scopes: granted }, userToken);
 
     const sync = await syncConnectionPages(user.id, connection.id, pages);
     const query = new URLSearchParams({ connected: "1" });
