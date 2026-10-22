@@ -43,13 +43,13 @@ export async function recentRepostCounts(db: Db, sources: CountSource[]) {
   return counts;
 }
 
-export type CloneItem = { root: string; pageId: string; message: string; linkUrl: string | null };
+export type CloneItem = { root: string; pageId: string; message: string; linkUrl: string | null; postType: string };
 
 /** One new row per item, each pointing at its original post. Returns the inserted rows. */
 export async function insertClones(db: Db, items: CloneItem[], when: RepostWhen) {
   const schedule = repostSchedule(when);
   const { data, error } = await db.posts.insert(items.map((item) => ({
-    page_id: item.pageId, message: item.message, link_url: item.linkUrl, reposted_from: item.root, ...schedule
+    page_id: item.pageId, message: item.message, link_url: item.linkUrl, post_type: item.postType, reposted_from: item.root, ...schedule
   }))).select(POST_COLUMNS);
   if (error) throw error;
   return rows<PostOut>(data);

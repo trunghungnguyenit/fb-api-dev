@@ -6,17 +6,22 @@ import { one, rows, userDb } from "@/lib/db";
 import { AppFailure } from "@/lib/errors";
 import { repostModes } from "@/lib/repost";
 import { attemptText, eventLabel, facebookPostUrl, formatDateTime, postErrorText, statusLabel, truncate } from "@/lib/labels";
+import { mediaOfPosts } from "@/lib/media/service";
+import { signedUrls } from "@/lib/media/storage";
+import CommentsPanel from "../comments-panel";
 import FacebookStats from "../facebook-stats";
 import PostActions from "../post-actions";
 import PostDangerActions from "../post-danger-actions";
+import StatusPill, { postTone } from "@/app/status-pill";
 
 export const dynamic = "force-dynamic";
 
 type PostDetail = {
-  id: string; page_id: string; message: string; link_url: string | null; status: string;
+  id: string; page_id: string; message: string; link_url: string | null; status: string; publish_phase: string | null;
   scheduled_at: string | null; published_at: string | null; facebook_post_id: string | null;
   last_error_code: string | null; attempt_count: number; edited_at: string | null;
-  facebook_deleted_at: string | null; reposted_from: string | null; created_at: string; updated_at: string;
+  facebook_deleted_at: string | null; reposted_from: string | null; note: string | null; import_batch_id: string | null;
+  created_at: string; updated_at: string;
 };
 type Attempt = {
   id: string; attempt_number: number; outcome: string; error_code: string | null;
@@ -33,7 +38,7 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
   const db = userDb(user.id);
 
   const [postResult, attemptsResult, eventsResult] = await Promise.all([
-    db.posts.select("id,page_id,message,link_url,status,scheduled_at,published_at,facebook_post_id,last_error_code,attempt_count,edited_at,facebook_deleted_at,reposted_from,created_at,updated_at").eq("id", id).maybeSingle(),
+    db.posts.select("id,page_id,message,link_url,status,publish_phase,scheduled_at,published_at,facebook_post_id,last_error_code,attempt_count,edited_at,facebook_deleted_at,reposted_from,note,import_batch_id,created_at,updated_at").eq("id", id).maybeSingle(),
     db.attempts.select("id,attempt_number,outcome,error_code,facebook_post_id,started_at,finished_at").eq("post_id", id).order("started_at", { ascending: true }),
     db.events.select("id,type,error_code,created_at").eq("post_id", id).order("created_at", { ascending: false }).limit(50)
   ]);
@@ -45,7 +50,7 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
 
   // Re-post family: the original this post was re-posted from, and the re-posts made from this post.
   const [pageResult, originalResult, copiesResult] = await Promise.all([
-    db.pages.select("page_name,is_active").eq("id", post.page_id).maybeSingle(),
+    db.pages.select("page_name,is_active,removed_at").eq("id", post.page_id).maybeSingle(),
     post.reposted_from
       ? db.posts.select("id,message,status,page_id,created_at,facebook_deleted_at").eq("id", post.reposted_from).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
@@ -57,7 +62,14 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
   if (copiesResult.error) throw new AppFailure("DB_ERROR", copiesResult.error);
   const original = one<Relative>(originalResult.data);
   const copies = rows<Relative>(copiesResult.data);
-  const page = one<{ page_name: string; is_active: boolean }>(pageData);
+  const page = one<{ page_name: string; is_active: boolean; removed_at: string | null }>(pageData);
+  const pageRemoved = Boolean(page?.removed_at);
+
+  // The post's images, shown through short-lived links (the bucket is private).
+  const images = (await mediaOfPosts(db, [id])).get(id) ?? [];
+  const liveImages = images.filter((i) => i.state === "uploaded");
+  const hasVideo = images.some((i) => i.kind !== "image");
+  const imageUrls = liveImages.length ? await signedUrls(liveImages.map((i) => i.storage_path), 60 * 60).catch(() => new Map<string, string>()) : new Map<string, string>();
 
   const attempts = rows<Attempt>(attemptsResult.data);
   const events = rows<PostEvent>(eventsResult.data);
@@ -80,8 +92,8 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
     <section className="panel" aria-labelledby="info">
       <h2 id="info">Thông tin</h2>
       <dl className="detail-grid">
-        <div><dt>Trạng thái</dt><dd><span className="pill">{statusLabel(post.status, deleted)}</span></dd></div>
-        <div><dt>Fanpage</dt><dd>{page?.page_name ?? "—"}{page && !page.is_active && <span className="subtle"> (đang tắt)</span>}</dd></div>
+        <div><dt>Trạng thái</dt><dd><StatusPill tone={postTone(post.status, deleted)}>{statusLabel(post.status, deleted, post.publish_phase)}</StatusPill>{post.status === "publishing" && post.publish_phase && <div className="subtle cell-meta">Video / Reels cần vài phút để Facebook xử lý. Trang tự cập nhật khi tải lại.</div>}</dd></div>
+        <div><dt>Fanpage</dt><dd>{page?.page_name ?? "—"}{page && pageRemoved && <span className="subtle"> (đã gỡ khỏi ứng dụng)</span>}{page && !pageRemoved && !page.is_active && <span className="subtle"> (đang tắt)</span>}</dd></div>
         <div><dt>Tạo lúc</dt><dd>{formatDateTime(post.created_at)}</dd></div>
         <div><dt>Giờ lên lịch</dt><dd>{post.scheduled_at ? formatDateTime(post.scheduled_at) : "—"}</dd></div>
         <div><dt>Đã đăng lúc</dt><dd>{post.published_at ? formatDateTime(post.published_at) : "—"}</dd></div>
@@ -90,6 +102,8 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
         <div><dt>Số lần thử đăng</dt><dd>{post.attempt_count}</dd></div>
         <div className="wide"><dt>Liên kết</dt><dd>{post.link_url
           ? <a href={post.link_url} target="_blank" rel="noopener noreferrer">{post.link_url}</a> : "—"}</dd></div>
+        {post.note && <div className="wide"><dt>Ghi chú nội bộ</dt><dd className="post-body">{post.note}</dd></div>}
+        {post.import_batch_id && <div className="wide"><dt>Nguồn</dt><dd>Nhập hàng loạt · <Link href={`/posts?batch=${post.import_batch_id}`}>xem các bài cùng lần nhập</Link></dd></div>}
         {post.facebook_post_id && <div className="wide"><dt>ID bài trên Facebook</dt><dd>{post.facebook_post_id}</dd></div>}
       </dl>
       {errorText && <p className="error" role="alert">{errorText}</p>}
@@ -111,16 +125,36 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
 
     <section className="panel" aria-labelledby="content">
       <h2 id="content">Nội dung</h2>
-      <p className="post-body">{post.message}</p>
-      <p className="subtle">{Array.from(post.message).length.toLocaleString("vi-VN")} ký tự</p>
+      <div className={hasVideo ? "post-content-video" : undefined}>
+        {images.length > 0 && <div className={hasVideo ? "post-media" : "media-gallery"}>{images.map((image) => {
+          const url = image.state === "uploaded" ? imageUrls.get(image.storage_path) : undefined;
+          return url
+            ? <figure key={image.id}>{image.kind === "image"
+                // eslint-disable-next-line @next/next/no-img-element
+                ? <img src={url} alt={image.file_name ?? "Ảnh của bài"} />
+                : <video className="post-video" src={url} controls preload="metadata" aria-label={image.file_name ?? "Video của bài"} />}</figure>
+            : <div key={image.id} className="media-gone">{image.state === "purged" ? "Tệp đã được dọn khỏi hệ thống" : "Không hiển thị được tệp"}</div>;
+        })}</div>}
+        <div className="post-text">
+          {post.message ? <p className="post-body">{post.message}</p> : <p className="subtle">Bài không có chú thích.</p>}
+          <p className="subtle">{Array.from(post.message).length.toLocaleString("vi-VN")} ký tự</p>
+        </div>
+      </div>
     </section>
 
     {published && post.facebook_post_id && (deleted
       ? <section className="panel"><p className="error" role="alert">Bài này đã bị xóa trên Facebook.</p></section>
       : <section className="panel" aria-labelledby="live">
           <h2 id="live">Trên Facebook</h2>
-          <FacebookStats postId={post.id} fallbackUrl={facebookPostUrl(post.facebook_post_id)} markedDeleted={deleted} />
+          {pageRemoved
+            ? <p className="notice">Fanpage này đã được gỡ khỏi ứng dụng nên chưa xem được số liệu, sửa hay xóa bài trên Facebook. <Link href="/pages">Kết nối lại Fanpage</Link> để dùng lại.</p>
+            : <FacebookStats postId={post.id} fallbackUrl={facebookPostUrl(post.facebook_post_id)} markedDeleted={deleted} />}
         </section>)}
+
+    {published && post.facebook_post_id && !deleted && !pageRemoved && <section className="panel" aria-labelledby="comments">
+      <h2 id="comments">Bình luận</h2>
+      <CommentsPanel kind="app" postId={post.id} />
+    </section>}
 
     <section className="panel" aria-labelledby="actions">
       <h2 id="actions">Thao tác</h2>

@@ -2,11 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { ApiFailure, callApi, userMessage } from "@/lib/client-api";
-import { messageFor } from "@/lib/errors";
+import { useRef, useState } from "react";
+import { useConfirm } from "@/app/confirm-dialog";
+import { FieldError, focusFirstInvalid, FormSummary, invalidProps, useFieldErrors } from "@/app/form-field";
+import { ApiFailure, callApi, fieldErrorsOf, userMessage } from "@/lib/client-api";
+import { checkLink, checkMessage, checkPageSelection, checkSchedule, MESSAGE_MAX, type FieldErrors } from "@/lib/field-errors";
 import { MAX_REPOST_PAGES, REPOST_MODE_INFO, type RepostMode } from "@/lib/repost";
 import { postErrorText, statusLabel } from "@/lib/labels";
+import StatusPill, { postTone } from "@/app/status-pill";
 
 type Page = { id: string; page_name: string };
 type Props = {
@@ -17,6 +20,8 @@ type Props = {
   sourcePageId: string;
   initial: { message: string; linkUrl: string };
   pages: Page[];
+  /** Images of the original: the re-post reuses them, so the caption may be empty and there is no link. */
+  imageCount?: number;
 };
 type When = "now" | "later" | "draft";
 type Result = {
@@ -30,7 +35,7 @@ const WHEN_OPTIONS: { value: When; title: string; hint: string }[] = [
   { value: "draft", title: "Lưu nháp", hint: "Xem lại rồi đăng sau" }
 ];
 
-export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, initial, pages }: Props) {
+export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, initial, pages, imageCount = 0 }: Props) {
   const router = useRouter();
   const [mode, setMode] = useState<RepostMode>(modes[0]);
   const [message, setMessage] = useState(initial.message);
@@ -43,6 +48,9 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<Result | null>(null);
+  const form = useFieldErrors();
+  const formRef = useRef<HTMLFormElement>(null);
+  const confirm = useConfirm();
 
   const isReplace = mode === "replace";
   const needsLiveConfirm = live && mode === "clone";
@@ -53,18 +61,47 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
   const togglePage = (pageId: string) => setSelected((prev) =>
     prev.includes(pageId) ? prev.filter((p) => p !== pageId) : prev.length >= MAX_REPOST_PAGES ? prev : [...prev, pageId]);
 
+  /** What is wrong with the form, field by field (empty when it can be sent). */
+  function validate(): FieldErrors {
+    const found: FieldErrors = {};
+    const messageError = checkMessage(message, { required: imageCount === 0 });
+    if (messageError) found.message = messageError;
+    if (!imageCount) {
+      const linkError = checkLink(linkUrl);
+      if (linkError) found.link = linkError;
+    }
+    if (!isReplace && mode !== "same_row") {
+      const pagesError = checkPageSelection(selected, MAX_REPOST_PAGES);
+      if (pagesError) found.pages = pagesError;
+    }
+    if (effectiveWhen === "later") {
+      const whenError = checkSchedule(whenLocal, Date.now(), { required: true });
+      if (whenError) found.when = whenError;
+    }
+    if (needsLiveConfirm && !confirmLive) found.confirmLive = "Hãy tích ô xác nhận bên dưới nếu bạn vẫn muốn đăng bài trùng nội dung.";
+    return found;
+  }
+
   async function submit(deleteOldFirst = false) {
     setError("");
+    if (!deleteOldFirst) {
+      const found = validate();
+      if (Object.keys(found).length) { form.setErrors(found); focusFirstInvalid(formRef.current); return; }
+      form.setErrors({});
+    }
     let whenValue = "now";
     if (effectiveWhen === "draft") whenValue = "draft";
-    if (effectiveWhen === "later") {
-      if (!whenLocal) return setError("Hãy chọn thời gian đăng.");
-      if (new Date(whenLocal).getTime() < Date.now() - 60_000) return setError(messageFor("SCHEDULE_IN_PAST"));
-      whenValue = new Date(whenLocal).toISOString();
-    }
-    if (!pageIds.length) return setError(messageFor("PAGE_NOT_FOUND"));
-    if (ambiguous && !window.confirm("Chưa rõ bài gốc đã được đăng lên Facebook hay chưa. Hãy kiểm tra Fanpage trước. Vẫn muốn đăng lại?")) return;
-    if (isReplace && !deleteOldFirst && !window.confirm("Bản mới sẽ được đăng trước. Nếu thành công, bài cũ sẽ bị XÓA khỏi Facebook cùng toàn bộ lượt thích, bình luận và chia sẻ, không thể khôi phục. Tiếp tục?")) return;
+    if (effectiveWhen === "later") whenValue = new Date(whenLocal).toISOString();
+    if (ambiguous && !(await confirm({
+      title: "Chưa rõ bài gốc đã được đăng chưa",
+      message: "Chưa rõ bài gốc đã được đăng lên Facebook hay chưa. Hãy kiểm tra Fanpage trước.\nVẫn muốn đăng lại?",
+      confirmLabel: "Vẫn đăng lại", cancelLabel: "Để tôi kiểm tra", tone: "danger"
+    }))) return;
+    if (isReplace && !deleteOldFirst && !(await confirm({
+      title: "Thay thế bài trên Facebook?",
+      message: "Bản mới sẽ được đăng trước. Nếu thành công, bài cũ sẽ bị XÓA khỏi Facebook cùng toàn bộ lượt thích, bình luận và chia sẻ, không thể khôi phục.",
+      confirmLabel: "Đăng bản mới và xóa bài cũ", tone: "danger"
+    }))) return;
 
     setBusy(true);
     try {
@@ -83,9 +120,17 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
     } catch (e) {
       if (e instanceof ApiFailure && e.code === "REPLACE_NEEDS_DELETE_FIRST") {
         setBusy(false);
-        if (window.confirm("Facebook từ chối đăng vì trùng với bài cũ.\n\nXóa bài cũ trên Facebook (không thể khôi phục) rồi đăng bản mới?")) return await submit(true);
+        const deleteFirst = await confirm({
+          title: "Facebook từ chối vì trùng với bài cũ",
+          message: "Xóa bài cũ trên Facebook (không thể khôi phục) rồi đăng bản mới?",
+          confirmLabel: "Xóa bài cũ và đăng", tone: "danger"
+        });
+        if (deleteFirst) return await submit(true);
         return setError(e.message);
       }
+      // The server names the wrong fields (names as in this form): mark them.
+      const fields = fieldErrorsOf(e);
+      if (fields) { form.setErrors(fields); focusFirstInvalid(formRef.current); return; }
       // A failed replace/publish still created a row the user can open and retry.
       const body = e instanceof ApiFailure ? (e.body as Partial<Result> | null) : null;
       if (body?.posts?.length) setResult({ posts: body.posts, warnings: [] });
@@ -100,7 +145,7 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
       <thead><tr><th scope="col">Bài</th><th scope="col">Trạng thái</th><th scope="col">Ghi chú</th></tr></thead>
       <tbody>{result.posts.map((p) => <tr key={p.id}>
         <td><Link href={`/posts/${p.id}`}>Mở chi tiết</Link></td>
-        <td><span className="pill">{statusLabel(p.status, Boolean(p.facebook_deleted_at))}</span></td>
+        <td><StatusPill tone={postTone(p.status, Boolean(p.facebook_deleted_at))}>{statusLabel(p.status, Boolean(p.facebook_deleted_at))}</StatusPill></td>
         <td>{postErrorText(p.last_error_code) ?? "—"}</td>
       </tr>)}</tbody>
     </table></div>
@@ -120,7 +165,8 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
   const firstPage = pageName(pageIds[0] ?? defaultPage);
   const morePages = Math.max(0, pageIds.length - 1);
 
-  return <form className="repost-grid" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
+  const over = message.length > MESSAGE_MAX;
+  return <form ref={formRef} noValidate className="repost-grid" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
     <div className="repost-main">
       <fieldset className="form-section">
         <legend>1. Cách đăng lại</legend>
@@ -134,9 +180,10 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
         {needsLiveConfirm && <div className="notice warn" role="note">
           <strong>Bài gốc vẫn còn trên Facebook.</strong> Đăng lại sẽ tạo bài trùng nội dung trên Fanpage; Facebook có thể từ chối hoặc coi là spam.
           <label className="choice-inline">
-            <input type="checkbox" checked={confirmLive} onChange={(e) => setConfirmLive(e.target.checked)} disabled={busy} />
+            <input id="confirm-live" type="checkbox" checked={confirmLive} onChange={(e) => { setConfirmLive(e.target.checked); form.clear("confirmLive"); }} disabled={busy} {...invalidProps("confirm-live", form.errors.confirmLive)} />
             <span>Tôi hiểu, vẫn muốn đăng bài mới</span>
           </label>
+          <FieldError id="confirm-live" message={form.errors.confirmLive} />
         </div>}
       </fieldset>
 
@@ -150,23 +197,27 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
                   {pages.map((p) => <option key={p.id} value={p.id}>{p.page_name}</option>)}
                 </select></div>
             : <>
-                <div className="choice-grid">
-                  {pages.map((p) => <label key={p.id} className={`choice-chip${selected.includes(p.id) ? " is-selected" : ""}`}>
-                    <input type="checkbox" checked={selected.includes(p.id)} onChange={() => togglePage(p.id)} disabled={busy} />
+                <div id="pages" className={`choice-grid${form.errors.pages ? " group-invalid" : ""}`} role="group" aria-label="Fanpage">
+                  {pages.map((p, i) => <label key={p.id} className={`choice-chip${selected.includes(p.id) ? " is-selected" : ""}`}>
+                    <input type="checkbox" checked={selected.includes(p.id)} onChange={() => { togglePage(p.id); form.clear("pages"); }} disabled={busy} {...(i === 0 ? invalidProps("pages", form.errors.pages) : {})} />
                     <span>{p.page_name}</span>
                   </label>)}
                 </div>
+                <FieldError id="pages" message={form.errors.pages} />
                 <p className="subtle form-hint">Chọn một hoặc nhiều Fanpage (tối đa {MAX_REPOST_PAGES}). Mỗi Fanpage tạo một bài riêng.</p>
               </>}
       </fieldset>
 
       <fieldset className="form-section">
         <legend>3. Nội dung</legend>
+        {imageCount > 0 && <p className="notice" role="note">Bài này có {imageCount} ảnh. Bài đăng lại dùng lại các ảnh đó (không tải lên lại); bài có ảnh không đăng kèm liên kết.</p>}
         <div className="field"><label htmlFor="message">Nội dung bài viết</label>
-          <textarea id="message" value={message} onChange={(e) => setMessage(e.target.value)} required maxLength={63206} disabled={busy} aria-describedby="count" />
-          <div id="count" className="subtle">{message.length.toLocaleString("vi-VN")} / 63.206 ký tự</div></div>
+          <textarea id="message" value={message} onChange={(e) => { setMessage(e.target.value); form.clear("message"); }} disabled={busy} {...invalidProps("message", form.errors.message, "count")} />
+          <div id="count" className={`subtle${over ? " over" : ""}`}>{message.length.toLocaleString("vi-VN")} / {MESSAGE_MAX.toLocaleString("vi-VN")} ký tự</div>
+          <FieldError id="message" message={form.errors.message} /></div>
         <div className="field"><label htmlFor="link">Liên kết (không bắt buộc)</label>
-          <input id="link" type="url" value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} disabled={busy} placeholder="https://example.com" /></div>
+          <input id="link" type="url" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} value={imageCount ? "" : linkUrl} onChange={(e) => { setLinkUrl(e.target.value); form.clear("link"); }} disabled={busy || imageCount > 0} placeholder="https://example.com" {...invalidProps("link", form.errors.link)} />
+          <FieldError id="link" message={form.errors.link} /></div>
       </fieldset>
     </div>
 
@@ -184,14 +235,16 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
                   </label>)}
                 </div>
                 {when === "later" && <div className="field"><label htmlFor="when-local">Ngày và giờ đăng</label>
-                  <input id="when-local" type="datetime-local" value={whenLocal} onChange={(e) => setWhenLocal(e.target.value)} disabled={busy} /></div>}
+                  <input id="when-local" type="datetime-local" value={whenLocal} onChange={(e) => { setWhenLocal(e.target.value); form.clear("when"); }} disabled={busy} {...invalidProps("when-local", form.errors.when)} />
+                  <FieldError id="when-local" message={form.errors.when} /></div>}
               </>}
         </fieldset>
 
         <div role="alert">{error && <p className="error">{error}</p>}</div>
-        <div className="form-footer">
+        <FormSummary count={form.count} />
+        <div className="form-footer sticky-actions">
           <p className="summary" aria-live="polite">{summary}</p>
-          <button className="btn primary" type="submit" disabled={busy || !message.trim() || !pageIds.length || (needsLiveConfirm && !confirmLive)}>
+          <button className="btn primary" type="submit" disabled={busy}>
             {busy ? "Đang xử lý…" : label}
           </button>
         </div>

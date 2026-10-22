@@ -22,9 +22,9 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ id
   if (!z.string().uuid().safeParse(id).success) return apiError("POST_NOT_FOUND", 404);
 
   const { data, error } = await userDb(user.id).posts
-    .select("id,page_id,status,facebook_post_id,facebook_deleted_at").eq("id", id).maybeSingle();
+    .select("id,page_id,status,post_type,facebook_post_id,facebook_deleted_at").eq("id", id).maybeSingle();
   if (error) return apiError("DB_ERROR", 500, { detail: error });
-  const post = one<{ id: string; page_id: string; status: string; facebook_post_id: string | null; facebook_deleted_at: string | null }>(data);
+  const post = one<{ id: string; page_id: string; status: string; post_type: string; facebook_post_id: string | null; facebook_deleted_at: string | null }>(data);
   if (!post) return apiError("POST_NOT_FOUND", 404);
   if (post.status !== "published" || !post.facebook_post_id) return apiError("POST_NO_FACEBOOK_ID", 409);
 

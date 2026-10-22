@@ -2,12 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { rows, userDb } from "@/lib/db";
-import { apiError } from "@/lib/api-error";
+import { apiError, invalidFields } from "@/lib/api-error";
 import { isSameOrigin } from "@/lib/csrf";
 import { AMBIGUOUS_CODE } from "@/lib/publisher";
 import { type ErrorCode, messageFor } from "@/lib/errors";
 import { isLiveOnFacebook, MAX_BULK_REPOST, pagesOverLimit, repostModes, repostRoot } from "@/lib/repost";
 import { fetchPosts, insertClones, publishInline, recentRepostCounts } from "@/lib/repost-service";
+import { repostSchedule } from "@/lib/repost";
+import { applyMedia, mediaOfPosts } from "@/lib/media/service";
+import { derivePostType } from "@/lib/media/rules";
+import type { MediaKind } from "@/lib/media/limits";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -39,7 +43,7 @@ export async function POST(request: NextRequest) {
   const user = await requireUser();
   if (!user) return apiError("UNAUTHENTICATED", 401);
   const parsed = schema.safeParse(await request.json().catch(() => null));
-  if (!parsed.success) return apiError("INVALID_REQUEST", 400);
+  if (!parsed.success) return invalidFields(parsed.error, { action: "Thao tác", ids: "Bài viết đã chọn", when: "Thời điểm đăng" });
   const { action } = parsed.data;
   const ids = [...new Set(parsed.data.ids)];
   if (ids.length > (action === "repost" ? MAX_BULK_REPOST : MAX_IDS)) return apiError("BULK_LIMIT", 400);
@@ -128,9 +132,12 @@ async function repostMany(db: ReturnType<typeof userDb>, eligible: Row[], when: 
   let openRoom = MAX_OPEN_POSTS - (open.count ?? 0);
 
   const counts = await recentRepostCounts(db, eligible.map((p) => ({ id: p.id, root: repostRoot(p), page_id: p.page_id })));
+  // A re-post reuses the original's images, so they must still exist.
+  const imagesOf = await mediaOfPosts(db, eligible.map((p) => p.id));
   const accepted: Row[] = [];
   for (const post of eligible) {
     const root = repostRoot(post);
+    if ((imagesOf.get(post.id) ?? []).some((r) => r.state !== "uploaded")) { skipped.set(post.id, "MEDIA_PURGED"); continue; }
     const perPage = counts.get(root) ?? new Map<string, number>();
     if (!activePages.has(post.page_id)) { skipped.set(post.id, "PAGE_INACTIVE"); continue; }
     if (pagesOverLimit(perPage, [post.page_id]).length) { skipped.set(post.id, "REPOST_LIMIT"); continue; }
@@ -143,10 +150,35 @@ async function repostMany(db: ReturnType<typeof userDb>, eligible: Row[], when: 
   }
   if (!accepted.length) return { done: 0, posts: [] };
 
-  const created = await insertClones(db, accepted.map((p) => ({
-    root: repostRoot(p), pageId: p.page_id, message: p.message, linkUrl: p.link_url
-  })), when);
-  const createdIds = created.map((p) => p.id);
+  const withImages = accepted.filter((p) => (imagesOf.get(p.id) ?? []).length > 0);
+  const plain = accepted.filter((p) => !withImages.includes(p));
+  const item = (p: Row, media: { kind: MediaKind }[]) => ({
+    root: repostRoot(p), pageId: p.page_id, message: p.message, linkUrl: p.link_url,
+    postType: derivePostType({ linkUrl: p.link_url, media })
+  });
+
+  const createdPlain = plain.length ? await insertClones(db, plain.map((p) => item(p, [])), when) : [];
+  // Posts with images start as drafts: nothing may be queued (and picked up by the scheduler) before its images are
+  // attached. They are scheduled right after.
+  const createdImages = withImages.length
+    ? await insertClones(db, withImages.map((p) => item(p, imagesOf.get(p.id)!)), "draft")
+    : [];
+  try {
+    for (let i = 0; i < createdImages.length; i++) {
+      const files = imagesOf.get(withImages[i].id)!;
+      await applyMedia(db, createdImages[i].id, {
+        refs: files.map((f) => ({ id: f.id, clone: true })), rows: files, postType: derivePostType({ media: files })
+      });
+    }
+  } catch (e) {
+    await db.posts.delete().in("id", createdImages.map((p) => p.id)).eq("status", "draft");
+    throw e;
+  }
+  if (createdImages.length && when !== "draft") {
+    await db.posts.update({ ...repostSchedule(when), updated_at: new Date().toISOString() })
+      .in("id", createdImages.map((p) => p.id)).eq("status", "draft");
+  }
+  const createdIds = [...createdPlain, ...createdImages].map((p) => p.id);
   if (when === "now") await publishInline(createdIds);
-  return { done: created.length, posts: await fetchPosts(db, createdIds) };
+  return { done: createdIds.length, posts: await fetchPosts(db, createdIds) };
 }

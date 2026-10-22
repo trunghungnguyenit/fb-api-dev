@@ -3,7 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 // Every user-facing query goes through here so `user_id` is applied automatically and
 // cannot be forgotten (the service-role client bypasses RLS). System jobs (cron/publisher)
 // that legitimately span users use supabaseAdmin directly and filter on the row's own user_id.
-type Table = "posts" | "facebook_pages" | "facebook_connections" | "publish_attempts" | "post_events";
+type Table = "posts" | "facebook_pages" | "facebook_connections" | "publish_attempts" | "post_events" | "import_batches" | "notifications" | "post_media" | "page_feed_posts" | "comment_actions";
 type SelectOptions = { head?: boolean; count?: "exact" | "planned" | "estimated" };
 
 function scoped(table: Table, userId: string) {
@@ -28,7 +28,12 @@ export function userDb(userId: string) {
     pages: scoped("facebook_pages", userId),
     connections: scoped("facebook_connections", userId),
     attempts: scoped("publish_attempts", userId),
-    events: scoped("post_events", userId)
+    events: scoped("post_events", userId),
+    imports: scoped("import_batches", userId),
+    notifications: scoped("notifications", userId),
+    media: scoped("post_media", userId),
+    feed: scoped("page_feed_posts", userId),
+    commentActions: scoped("comment_actions", userId)
   };
 }
 
@@ -48,9 +53,11 @@ export async function withPageNames<T extends { page_id: string }>(db: Scoped, p
   const ids = [...new Set(posts.map((p) => p.page_id))];
   const names = new Map<string, string>();
   if (ids.length) {
-    const { data, error } = await db.pages.select("id,page_name").in("id", ids);
+    const { data, error } = await db.pages.select("id,page_name,removed_at").in("id", ids);
     if (error) throw error;
-    for (const p of rows<{ id: string; page_name: string }>(data)) names.set(p.id, p.page_name);
+    for (const p of rows<{ id: string; page_name: string; removed_at: string | null }>(data)) {
+      names.set(p.id, p.removed_at ? `${p.page_name} (đã gỡ)` : p.page_name);
+    }
   }
   return posts.map((p) => ({ ...p, facebook_pages: names.has(p.page_id) ? { page_name: names.get(p.page_id)! } : null }));
 }

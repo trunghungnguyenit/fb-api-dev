@@ -7,6 +7,12 @@ import { MetaApiError } from "@/lib/meta/client";
 const meta = (code: string, httpStatus = 400, subcode?: string) => new MetaApiError("raw meta text", code, httpStatus, { subcode });
 
 describe("isGoneError", () => {
+  it("also matches what Facebook answers for a deleted post: code 10 \"Object does not exist\"", () => {
+    const gone = new MetaApiError("(#10) Object does not exist, cannot be loaded due to missing permission or review", "10", 400);
+    expect(isGoneError(gone)).toBe(true);
+    expect(isGoneError(new MetaApiError("(#10) This endpoint requires the 'pages_read_engagement' permission", "10", 403))).toBe(false);
+  });
+
   it("only matches code 100 with subcode 33 (object does not exist)", () => {
     expect(isGoneError(meta("100", 400, "33"))).toBe(true);
     expect(isGoneError(meta("100", 400, "1234"))).toBe(false);

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { env } from "@/lib/env";
 import { requireUser } from "@/lib/auth";
 import { createOAuthState } from "@/lib/oauth-state";
+import { oauthScopes } from "@/lib/meta/scopes";
 
 export const runtime = "nodejs";
 
@@ -18,7 +19,7 @@ export async function GET() {
   url.searchParams.set("response_type", "code");
   // Re-ask permissions the user declined earlier, otherwise Facebook silently skips them.
   url.searchParams.set("auth_type", "rerequest");
-  url.searchParams.set("scope", "pages_show_list,pages_read_engagement,pages_manage_posts");
+  url.searchParams.set("scope", oauthScopes());
 
   const response = NextResponse.redirect(url);
   response.cookies.set("meta_oauth_state", state, {

@@ -3,21 +3,30 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { type ConfirmOptions, useConfirm } from "@/app/confirm-dialog";
 import { callApi, userMessage } from "@/lib/client-api";
+import ErrorCell from "./error-cell";
+import StatusPill, { postTone } from "@/app/status-pill";
 import RowActions from "./row-actions";
 
 export type PostRowView = {
   id: string;
   text: string;
+  /** "1 ảnh" / "Nhiều ảnh" for posts with images. */
+  kind: string | null;
   pageName: string;
   status: string;
   statusText: string;
+  /** The post is gone from Facebook (its status stays "published"). */
+  deleted: boolean;
+  hasError: boolean;
   timeLabel: string | null;
   timeValue: string;
   errorText: string;
   lastErrorCode: string | null;
   facebookPostId: string | null;
   reposted: boolean;
+  note: string | null;
   canRepost: boolean;
   editable: boolean;
 };
@@ -36,16 +45,19 @@ const VERB: Record<BulkAction, string> = {
 };
 const DONE: Record<BulkAction, string> = { cancel: "Đã hủy", delete: "Đã xóa", "repost-draft": "Đã tạo", "repost-now": "Đã tạo" };
 
-function confirmText(action: BulkAction, count: number) {
-  const head = `${VERB[action]} ${count} bài đã chọn?`;
-  if (action === "delete") return `${head}\n\nChỉ xóa các bài chưa đăng. Bài đã đăng lên Facebook sẽ được bỏ qua (xóa từng bài ở trang chi tiết).`;
-  if (action === "cancel") return head;
-  const live = "\n\nMỗi bài được sao chép thành một bài mới. Bài còn trên Facebook sẽ được bỏ qua (hãy đăng lại từng bài để xác nhận).";
-  return action === "repost-now" ? `${head}${live}\nCác bài mới sẽ được đăng lên Facebook ngay.` : `${head}${live}`;
+function confirmOptions(action: BulkAction, count: number): ConfirmOptions {
+  const title = `${VERB[action]} ${count} bài đã chọn?`;
+  if (action === "delete") return { title, message: "Chỉ xóa các bài chưa đăng. Bài đã đăng lên Facebook sẽ được bỏ qua (xóa từng bài ở trang chi tiết).", confirmLabel: "Xóa", tone: "danger" };
+  if (action === "cancel") return { title, confirmLabel: "Hủy lịch" };
+  const live = "Mỗi bài được sao chép thành một bài mới. Bài còn trên Facebook sẽ được bỏ qua (hãy đăng lại từng bài để xác nhận).";
+  return action === "repost-now"
+    ? { title, message: `${live}\nCác bài mới sẽ được đăng lên Facebook ngay.`, confirmLabel: "Đăng lại ngay", tone: "danger" }
+    : { title, message: live, confirmLabel: "Tạo bản nháp" };
 }
 
 export default function PostsTable({ posts }: { posts: PostRowView[] }) {
   const router = useRouter();
+  const confirm = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<BulkAction | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
@@ -61,7 +73,7 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(ids));
 
   async function bulk(action: BulkAction) {
-    if (!window.confirm(confirmText(action, selected.size))) return;
+    if (!(await confirm(confirmOptions(action, selected.size)))) return;
     const repost = action === "repost-draft" || action === "repost-now";
     setBusy(action); setNotice(null);
     try {
@@ -102,7 +114,7 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
       </div>}
     </div>
 
-    <div className="table-wrap"><table className="posts-table">
+    <div className="table-wrap"><table className="posts-table cards">
       <thead><tr>
         <th scope="col"><input ref={allRef} type="checkbox" aria-label="Chọn tất cả bài trên trang này" checked={allSelected} onChange={toggleAll} disabled={ids.length === 0} /></th>
         <th scope="col" className="col-content">Nội dung</th><th scope="col">Fanpage</th><th scope="col">Trạng thái</th>
@@ -110,19 +122,20 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
       </tr></thead>
       <tbody>
         {posts.map((post) => <tr key={post.id}>
-          <td><input type="checkbox" aria-label="Chọn bài này" checked={selected.has(post.id)} onChange={() => toggle(post.id)} /></td>
-          <td>
-            <Link href={`/posts/${post.id}`}>{post.text}</Link>{post.reposted && <span className="badge">Đăng lại</span>}
-            {post.facebookPostId && <div className="subtle cell-meta" title={post.facebookPostId}>ID Facebook: {shortId(post.facebookPostId)}</div>}
+          <td data-label=""><input type="checkbox" aria-label="Chọn bài này" checked={selected.has(post.id)} onChange={() => toggle(post.id)} /></td>
+          <td className="col-content" data-label="Nội dung">
+            <Link href={`/posts/${post.id}`}>{post.text}</Link>{post.kind && <span className="badge">{post.kind}</span>}{post.reposted && <span className="badge">Đăng lại</span>}
+            {post.note && <div className="subtle cell-meta cell-note" title={post.note}>Ghi chú: {post.note}</div>}
+            {post.facebookPostId && <div className="subtle cell-meta" title={post.facebookPostId}>ID Facebook: <span className="mono">{shortId(post.facebookPostId)}</span></div>}
           </td>
-          <td className="cell-nowrap">{post.pageName}</td>
-          <td><span className="pill">{post.statusText}</span></td>
-          <td className="cell-nowrap">
+          <td className="cell-nowrap" data-label="Fanpage">{post.pageName}</td>
+          <td data-label="Trạng thái"><StatusPill tone={postTone(post.status, post.deleted)}>{post.statusText}</StatusPill></td>
+          <td className="cell-nowrap" data-label="Thời gian"><div>
             {post.timeLabel && <div className="subtle cell-meta">{post.timeLabel}</div>}
-            <div>{post.timeValue}</div>
-          </td>
-          <td className="col-error"><span className="error-clamp" title={post.errorText}>{post.errorText}</span></td>
-          <td className="col-actions">
+            {post.timeValue === "—" ? <span className="cell-none">—</span> : <div className="mono time-value">{post.timeValue}</div>}
+          </div></td>
+          <td className="col-error" data-label="Lỗi">{post.hasError ? <ErrorCell text={post.errorText} /> : <span className="cell-none">—</span>}</td>
+          <td className="col-actions" data-label="Thao tác">
             <RowActions id={post.id} status={post.status} lastErrorCode={post.lastErrorCode} canRepost={post.canRepost} editable={post.editable} />
           </td>
         </tr>)}
