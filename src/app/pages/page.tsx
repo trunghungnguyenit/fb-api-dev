@@ -9,6 +9,7 @@ import { connectionAttention, featureLabels } from "@/lib/meta/token-health";
 import { unavailableFeatures } from "@/lib/meta/scopes";
 import StatusPill from "@/app/status-pill";
 import ClearQuery from "../clear-query";
+import { Toast } from "../toast";
 import RemovePageButton from "./remove-page-dialog";
 import RemovedPageActions from "./removed-page-actions";
 
@@ -68,14 +69,14 @@ export default async function PagesPage({ searchParams }: { searchParams: Promis
       </div>
     </header>
     {hasBanner && <ClearQuery />}
-    {error && <p className="error" role="alert">{withRef(messageFor(error), ref && REF_PATTERN.test(ref) ? ref : null)}</p>}
-    {connected && <p className="success">Đã kết nối Facebook.{failedCount ? ` ${failedCount} Fanpage không lưu được, hãy thử lại.` : ""}</p>}
-    {checked && <p className="success">Đã kiểm tra quyền các Fanpage.</p>}
-    {removed !== undefined && <p className="success" role="status">Đã gỡ Fanpage.{cancelledCount > 0 ? ` Đã hủy ${cancelledCount} bài chưa đăng.` : ""} Fanpage nằm trong mục “Fanpage đã gỡ” bên dưới; bạn có thể kết nối lại bất cứ lúc nào.</p>}
-    {restored && <p className="success" role="status">Đã kết nối lại Fanpage.</p>}
-    {feedsynced && <p className="success" role="status">{feedsynced === "recent" ? "Fanpage này vừa được đồng bộ, hãy thử lại sau ít phút." : `Đã đọc ${count(feedsynced)} bài từ Facebook.`}</p>}
-    {deleted && <p className="success" role="status">Đã xóa hẳn Fanpage khỏi danh sách.</p>}
-    {deactivatedCount > 0 && <p className="error">{deactivatedCount} Fanpage đã mất quyền và bị tắt. Các bài đã lên lịch của Fanpage đó vẫn được giữ trong hàng đợi và sẽ tự đăng sau khi bạn kết nối lại Facebook.</p>}
+    {error && <Toast kind="error" text={withRef(messageFor(error), ref && REF_PATTERN.test(ref) ? ref : null)} />}
+    {connected && <Toast kind="success" text={`Đã kết nối Facebook.${failedCount ? ` ${failedCount} Fanpage không lưu được, hãy thử lại.` : ""}`} />}
+    {checked && <Toast kind="success" text="Đã kiểm tra quyền các Fanpage." />}
+    {removed !== undefined && <Toast kind="success" text={`Đã gỡ Fanpage.${cancelledCount > 0 ? ` Đã hủy ${cancelledCount} bài chưa đăng.` : ""} Fanpage nằm trong mục “Fanpage đã gỡ” bên dưới; bạn có thể kết nối lại bất cứ lúc nào.`} />}
+    {restored && <Toast kind="success" text="Đã kết nối lại Fanpage." />}
+    {feedsynced && <Toast kind={feedsynced === "recent" ? "warning" : "success"} text={feedsynced === "recent" ? "Fanpage này vừa được đồng bộ, hãy thử lại sau ít phút." : `Đã đọc ${count(feedsynced)} bài từ Facebook.`} />}
+    {deleted && <Toast kind="success" text="Đã xóa hẳn Fanpage khỏi danh sách." />}
+    {deactivatedCount > 0 && <Toast kind="error" text={`${deactivatedCount} Fanpage đã mất quyền và bị tắt. Các bài đã lên lịch của Fanpage đó vẫn được giữ trong hàng đợi và sẽ tự đăng sau khi bạn kết nối lại Facebook.`} />}
 
     {attention.map(({ id, name, state }) => state?.kind === "invalid"
       ? <p key={id} className="error" role="alert">Kết nối Facebook{name ? ` (${name})` : ""} cần xác thực lại: Facebook không còn chấp nhận quyền truy cập đã lưu, nên các Fanpage thuộc kết nối này chưa đăng được bài. Bấm “Kết nối Facebook” để cấp quyền lại.</p>

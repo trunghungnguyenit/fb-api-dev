@@ -4,7 +4,7 @@ import { COMMENT_MANAGE_SCOPES, COMMENT_READ_SCOPES, ENABLED_FEATURES, featureAc
 describe("scopes", () => {
   it("asks for exactly the permissions of the features the app has code for", () => {
     expect(oauthScopes().split(",").sort()).toEqual([
-      "pages_manage_engagement", "pages_manage_posts", "pages_read_engagement", "pages_read_user_content", "pages_show_list"
+      "pages_manage_engagement", "pages_manage_posts", "pages_read_engagement", "pages_read_user_content", "pages_show_list", "read_insights"
     ]);
     for (const feature of ENABLED_FEATURES) for (const scope of FEATURES[feature].scopes) expect(oauthScopes()).toContain(scope);
   });
@@ -33,13 +33,21 @@ describe("scopes", () => {
     expect(access.readEngagement).toEqual({ available: false, missing: ["pages_read_engagement"] });
     expect(access.comments.available).toBe(false);
     expect(access.comments.missing).toEqual(["pages_read_user_content", "pages_manage_engagement"]);
+    expect(access.insights).toEqual({ available: false, missing: ["read_insights", "pages_read_engagement"] });
+  });
+
+  it("Insights needs read_insights together with pages_read_engagement, and is optional", () => {
+    expect(FEATURES.insights.scopes).toEqual(["read_insights", "pages_read_engagement"]);
+    expect(FEATURES.insights.required).toBe(false);
   });
 
   it("lists enabled features that need more permissions (and not disabled ones)", () => {
-    const all = ["pages_show_list", "pages_manage_posts", "pages_read_engagement", "pages_read_user_content", "pages_manage_engagement"];
+    const all = ["pages_show_list", "pages_manage_posts", "pages_read_engagement", "pages_read_user_content", "pages_manage_engagement", "read_insights"];
     expect(unavailableFeatures(all)).toEqual([]);
-    expect(unavailableFeatures(["pages_show_list", "pages_manage_posts", "pages_read_engagement"])).toEqual(["comments"]);
-    expect(unavailableFeatures(["pages_show_list", "pages_manage_posts"])).toEqual(["readEngagement", "comments"]);
-    expect(unavailableFeatures([])).toEqual(["publish", "readEngagement", "comments"]);
+    // A connection made before Insights existed: everything works except the new feature.
+    expect(unavailableFeatures(all.filter((s) => s !== "read_insights"))).toEqual(["insights"]);
+    expect(unavailableFeatures(["pages_show_list", "pages_manage_posts", "pages_read_engagement", "read_insights"])).toEqual(["comments"]);
+    expect(unavailableFeatures(["pages_show_list", "pages_manage_posts"])).toEqual(["readEngagement", "comments", "insights"]);
+    expect(unavailableFeatures([])).toEqual(["publish", "readEngagement", "comments", "insights"]);
   });
 });

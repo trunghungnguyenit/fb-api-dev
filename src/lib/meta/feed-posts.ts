@@ -125,7 +125,42 @@ export function mapFeedPost(g: GraphFeedPost, opts: { engagement?: boolean } = {
   };
 }
 
-export type KnownFeedRow = { id: string; facebook_post_id: string; created_time: string; absent_checks: number; missing_since: string | null };
+export type KnownFeedRow = {
+  id: string; facebook_post_id: string; created_time: string; absent_checks: number; missing_since: string | null;
+  /** What the last read counted, and how many of those the user has looked at (see lib/new-comments.ts). Null = unknown. */
+  comments_count?: number | null; comments_seen_count?: number | null;
+};
+
+export type CommentIncrease = { feedPostId: string; facebookPostId: string; createdTime: string; added: number };
+
+/**
+ * Posts that gained comments since the last read: stored count known, new count known and higher. A post seen for the
+ * first time, a count Facebook did not give (either side), and a count that went DOWN (a comment deleted) never count,
+ * so connecting a Page or a failed field read cannot flood the user with "new comments".
+ */
+export function commentIncreases(known: readonly KnownFeedRow[], read: readonly MappedFeedPost[]): CommentIncrease[] {
+  const byId = new Map(known.map((k) => [k.facebook_post_id, k]));
+  const out: CommentIncrease[] = [];
+  for (const post of read) {
+    const row = byId.get(post.facebook_post_id);
+    if (!row || row.missing_since) continue;
+    const before = row.comments_count;
+    const now = post.comments_count;
+    if (typeof before !== "number" || typeof now !== "number" || now <= before) continue;
+    out.push({ feedPostId: row.id, facebookPostId: post.facebook_post_id, createdTime: post.created_time, added: now - before });
+  }
+  return out;
+}
+
+/**
+ * Whether the "seen" mark of a stored post must be set to the freshly read count: it was never set (a baseline, so
+ * nothing looks new), or the count fell below it (a comment was deleted, and the next real one must show as new).
+ */
+export function seenNeedsUpdate(row: Pick<KnownFeedRow, "comments_seen_count">, now: number | null): boolean {
+  if (now === null) return false;
+  const seen = row.comments_seen_count;
+  return seen === null || seen === undefined || now < seen;
+}
 
 /**
  * After a COMPLETE read of the window, which stored posts did Facebook not return? A post is only believed gone

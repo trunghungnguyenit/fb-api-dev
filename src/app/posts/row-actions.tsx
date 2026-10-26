@@ -4,14 +4,16 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { FieldError, invalidProps } from "@/app/form-field";
 import { IconEye, IconRepeat, IconSend } from "@/app/icons";
+import { canRemoveRecord } from "@/lib/post-record";
 import { usePostActions } from "./use-post-actions";
+import { Toast } from "@/app/toast";
 
-type Props = { id: string; status: string; lastErrorCode: string | null; canRepost: boolean; editable: boolean };
+type Props = { id: string; status: string; lastErrorCode: string | null; canRepost: boolean; editable: boolean; deletedOnFacebook?: boolean };
 type MenuPosition = { top?: number; bottom?: number; right: number };
 
 // Compact controls for one row of the posts list: "Xem chi tiết", then one primary action (publish / retry / re-post), and a "⋯" menu with the rest.
-export default function RowActions({ id, status, lastErrorCode, canRepost, editable }: Props) {
-  const { busy, error, scheduleError, clearScheduleError, run } = usePostActions({ id, lastErrorCode });
+export default function RowActions({ id, status, lastErrorCode, canRepost, editable, deletedOnFacebook = false }: Props) {
+  const { busy, error, scheduleError, clearScheduleError, run, removeRecord } = usePostActions({ id, lastErrorCode });
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<MenuPosition>({ right: 0 });
   const [scheduling, setScheduling] = useState(false);
@@ -22,7 +24,9 @@ export default function RowActions({ id, status, lastErrorCode, canRepost, edita
   const canPublish = status === "draft" || status === "failed";
   const canCancel = status === "draft" || status === "scheduled" || status === "failed";
   const primaryRepost = canRepost && !canPublish; // published / cancelled: re-posting IS the main action
-  const hasMenu = editable || canCancel || (canRepost && canPublish) || status === "draft";
+  // The record can go when the post is not live on Facebook: never published (or cancelled), or already deleted there.
+  const canRemove = canRemoveRecord(status, deletedOnFacebook);
+  const hasMenu = editable || canCancel || canRemove || (canRepost && canPublish) || status === "draft";
 
   // The menu is position:fixed so the table's scroll container never clips it; any scroll/resize closes it.
   useEffect(() => {
@@ -86,8 +90,12 @@ export default function RowActions({ id, status, lastErrorCode, canRepost, edita
         onClick={async () => { if (await run("cancel")) setOpen(false); }}>
         {busy === "cancel" ? "Đang hủy…" : "Hủy bài"}
       </button>}
+      {canRemove && <button role="menuitem" className="row-menu-item danger" type="button" disabled={disabled}
+        onClick={async () => { setOpen(false); await removeRecord(deletedOnFacebook); }}>
+        {busy === "delete" ? "Đang xóa…" : "Xóa bản ghi"}
+      </button>}
     </div>}
 
-    {error && <p className="row-error" role="alert">{error}</p>}
+    {error && <Toast kind="error" text={error} />}
   </div>;
 }

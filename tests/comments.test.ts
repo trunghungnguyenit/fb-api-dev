@@ -184,7 +184,52 @@ describe("permissions", () => {
   });
 });
 
+describe("the live total of the comments", () => {
+  it("becomes what the user has seen, but only for the first page of a post", async () => {
+    fake.tables.page_feed_posts[0].comments_count = 5;
+    fake.tables.page_feed_posts[0].comments_seen_count = 2;
+    metaGet.mockResolvedValue({ data: [graphComment(COMMENT)], paging: { cursors: { after: "C2" }, next: "x" }, summary: { total_count: 41 } });
+    await get(FEED_ID, "kind=feed&after=C2"); // a later page: nothing changes
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 5, comments_seen_count: 2 });
+    await get(FEED_ID, "kind=feed");
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 41, comments_seen_count: 41 });
+  });
+
+  it("is not taken when Facebook gave no total", async () => {
+    fake.tables.page_feed_posts[0].comments_count = 5;
+    fake.tables.page_feed_posts[0].comments_seen_count = 2;
+    metaGet.mockResolvedValue({ data: [graphComment(COMMENT)] });
+    await get(FEED_ID, "kind=feed");
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 5, comments_seen_count: 2 });
+  });
+});
+
 describe("replying", () => {
+  it("does not let the user's own comment on a post be announced as a new one", async () => {
+    fake.tables.page_feed_posts[0].comments_count = 5;
+    fake.tables.page_feed_posts[0].comments_seen_count = 4;
+    metaPost.mockResolvedValue({ id: "122111511207403780_7001" });
+    expect((await reply({ kind: "feed", message: "Cảm ơn mọi người" }, FEED_ID)).status).toBe(201);
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 6, comments_seen_count: 5 }); // the unseen one is still unseen
+
+    // Same through the app's own post (found by the link between them).
+    fake.tables.page_feed_posts[0].post_id = POST_ID;
+    expect((await reply({ kind: "app", message: "Cảm ơn lần nữa" })).status).toBe(201);
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 7, comments_seen_count: 6 });
+  });
+
+  it("leaves the stored count alone for a reply to a comment (Facebook does not say whether that is counted) and when there is no count", async () => {
+    fake.tables.page_feed_posts[0].comments_count = 5;
+    fake.tables.page_feed_posts[0].comments_seen_count = 5;
+    metaPost.mockResolvedValue({ id: "c1_c2" });
+    await reply({ kind: "feed", message: "ok", replyTo: COMMENT }, FEED_ID);
+    expect(fake.tables.page_feed_posts[0]).toMatchObject({ comments_count: 5, comments_seen_count: 5 });
+
+    fake.tables.page_feed_posts[0].comments_count = null;
+    await reply({ kind: "feed", message: "ok" }, FEED_ID);
+    expect(fake.tables.page_feed_posts[0].comments_count).toBeNull();
+  });
+
   it("replies to a comment as the Page and logs it without any text", async () => {
     metaPost.mockResolvedValue({ id: "122111511207403780_5551" });
     const res = await reply({ kind: "app", message: "  Giá 100k bạn nhé  ", replyTo: COMMENT });

@@ -5,6 +5,7 @@ import { useState } from "react";
 import { callApi, userMessage } from "@/lib/client-api";
 import { messageFor } from "@/lib/errors";
 import type { UserSyncStats } from "@/lib/feed-sync";
+import { Toast } from "@/app/toast";
 
 function summary(s: UserSyncStats) {
   if (s.pages === 0) return { ok: false, text: "Chưa có Fanpage nào đang hoạt động để đọc bài." };
@@ -32,6 +33,6 @@ export default function RefreshFeedButton() {
 
   return <div className="refresh-feed">
     <button type="button" className="btn" disabled={busy} onClick={() => void run()}>{busy ? "Đang tải lại…" : "↻ Tải lại từ Facebook"}</button>
-    {note && <p className={note.ok ? "subtle" : "row-error"} role="status">{note.text}</p>}
+    {note && <Toast kind={note.ok ? "success" : "error"} text={note.text} />}
   </div>;
 }

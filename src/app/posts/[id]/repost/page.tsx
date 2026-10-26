@@ -12,7 +12,7 @@ import RepostForm from "./repost-form";
 export const dynamic = "force-dynamic";
 
 type Source = {
-  id: string; page_id: string; message: string; link_url: string | null; status: string;
+  id: string; page_id: string; message: string; link_url: string | null; post_type: string | null; status: string;
   facebook_post_id: string | null; facebook_deleted_at: string | null; last_error_code: string | null;
 };
 
@@ -24,7 +24,7 @@ export default async function RepostPage({ params }: { params: Promise<{ id: str
   const db = userDb(user.id);
 
   const [postResult, pagesResult] = await Promise.all([
-    db.posts.select("id,page_id,message,link_url,status,facebook_post_id,facebook_deleted_at,last_error_code").eq("id", id).maybeSingle(),
+    db.posts.select("id,page_id,message,link_url,post_type,status,facebook_post_id,facebook_deleted_at,last_error_code").eq("id", id).maybeSingle(),
     db.pages.select("id,page_name").eq("is_active", true).order("page_name")
   ]);
   if (postResult.error) throw new AppFailure("DB_ERROR", postResult.error);
@@ -61,6 +61,7 @@ export default async function RepostPage({ params }: { params: Promise<{ id: str
         live={isLiveOnFacebook(post)}
         ambiguous={post.last_error_code === "AMBIGUOUS"}
         sourcePageId={post.page_id}
+        postType={post.post_type ?? "text"}
         initial={{ message: post.message, linkUrl: post.link_url ?? "" }}
         pages={pages}
         imageCount={images.length}

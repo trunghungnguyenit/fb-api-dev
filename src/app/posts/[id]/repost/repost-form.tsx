@@ -8,8 +8,11 @@ import { FieldError, focusFirstInvalid, FormSummary, invalidProps, useFieldError
 import { ApiFailure, callApi, fieldErrorsOf, userMessage } from "@/lib/client-api";
 import { checkLink, checkMessage, checkPageSelection, checkSchedule, MESSAGE_MAX, type FieldErrors } from "@/lib/field-errors";
 import { MAX_REPOST_PAGES, REPOST_MODE_INFO, type RepostMode } from "@/lib/repost";
+import { kindOfPostType, mediaKindOf, type PostKind } from "@/lib/post-kind";
+import PostKindPicker, { KindBadge } from "@/app/posts/post-kind-picker";
 import { postErrorText, statusLabel } from "@/lib/labels";
 import StatusPill, { postTone } from "@/app/status-pill";
+import { Toast } from "@/app/toast";
 
 type Page = { id: string; page_name: string };
 type Props = {
@@ -18,6 +21,8 @@ type Props = {
   live: boolean;
   ambiguous: boolean;
   sourcePageId: string;
+  /** The stored post_type of the original: a post with files keeps its kind, a text or link post can be either. */
+  postType: string;
   initial: { message: string; linkUrl: string };
   pages: Page[];
   /** Images of the original: the re-post reuses them, so the caption may be empty and there is no link. */
@@ -35,11 +40,20 @@ const WHEN_OPTIONS: { value: When; title: string; hint: string }[] = [
   { value: "draft", title: "Lưu nháp", hint: "Xem lại rồi đăng sau" }
 ];
 
-export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, initial, pages, imageCount = 0 }: Props) {
+// Kinds a text or link original can be re-posted as (the files of the others are reused as they are, so their kind is fixed).
+const TEXT_KINDS: readonly PostKind[] = ["text", "link"];
+
+export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, postType, initial, pages, imageCount = 0 }: Props) {
   const router = useRouter();
   const [mode, setMode] = useState<RepostMode>(modes[0]);
   const [message, setMessage] = useState(initial.message);
   const [linkUrl, setLinkUrl] = useState(initial.linkUrl);
+  const sourceKind = kindOfPostType(postType);
+  const hasFiles = imageCount > 0 || mediaKindOf(sourceKind) !== null;
+  const [textKind, setTextKind] = useState<PostKind>(initial.linkUrl ? "link" : "text");
+  const kind: PostKind = hasFiles ? sourceKind : textKind;
+  // What is sent as the link: only a link post has one.
+  const effectiveLink = kind === "link" ? linkUrl : "";
   const defaultPage = pages.some((p) => p.id === sourcePageId) ? sourcePageId : pages[0].id;
   const [selected, setSelected] = useState<string[]>([defaultPage]);
   const [when, setWhen] = useState<When>("now");
@@ -64,10 +78,10 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
   /** What is wrong with the form, field by field (empty when it can be sent). */
   function validate(): FieldErrors {
     const found: FieldErrors = {};
-    const messageError = checkMessage(message, { required: imageCount === 0 });
+    const messageError = checkMessage(message, { required: !hasFiles });
     if (messageError) found.message = messageError;
-    if (!imageCount) {
-      const linkError = checkLink(linkUrl);
+    if (kind === "link") {
+      const linkError = checkLink(linkUrl, { required: true });
       if (linkError) found.link = linkError;
     }
     if (!isReplace && mode !== "same_row") {
@@ -107,7 +121,7 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
     try {
       const response = await callApi<Result>(`/api/posts/${id}/repost`, {
         method: "POST",
-        body: { mode, message, linkUrl, pageIds, when: whenValue, confirmLive: confirmLive || undefined, force: ambiguous || undefined, deleteOldFirst: deleteOldFirst || undefined }
+        body: { mode, message, linkUrl: effectiveLink, pageIds, when: whenValue, confirmLive: confirmLive || undefined, force: ambiguous || undefined, deleteOldFirst: deleteOldFirst || undefined }
       });
       const only = response.posts.length === 1 ? response.posts[0] : null;
       if (only && response.warnings.length === 0 && only.status !== "failed") {
@@ -210,14 +224,17 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
 
       <fieldset className="form-section">
         <legend>3. Nội dung</legend>
-        {imageCount > 0 && <p className="notice" role="note">Bài này có {imageCount} ảnh. Bài đăng lại dùng lại các ảnh đó (không tải lên lại); bài có ảnh không đăng kèm liên kết.</p>}
-        <div className="field"><label htmlFor="message">Nội dung bài viết</label>
+        {hasFiles
+          ? <KindBadge kind={sourceKind} note="giữ nguyên như bài gốc" />
+          : <PostKindPicker value={kind} onChange={(next) => { setTextKind(next); form.clear("link"); }} kinds={TEXT_KINDS} disabled={busy} />}
+        {imageCount > 0 && <p className="notice" role="note">Bài này có {imageCount} {sourceKind === "images" ? "ảnh" : "video"}. Bài đăng lại dùng lại {imageCount > 1 ? "các tệp" : "tệp"} đó (không tải lên lại); bài có tệp không đăng kèm liên kết.</p>}
+        <div className="field"><label htmlFor="message">{hasFiles ? "Chú thích (không bắt buộc)" : "Nội dung bài viết"}</label>
           <textarea id="message" value={message} onChange={(e) => { setMessage(e.target.value); form.clear("message"); }} disabled={busy} {...invalidProps("message", form.errors.message, "count")} />
           <div id="count" className={`subtle${over ? " over" : ""}`}>{message.length.toLocaleString("vi-VN")} / {MESSAGE_MAX.toLocaleString("vi-VN")} ký tự</div>
           <FieldError id="message" message={form.errors.message} /></div>
-        <div className="field"><label htmlFor="link">Liên kết (không bắt buộc)</label>
-          <input id="link" type="url" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} value={imageCount ? "" : linkUrl} onChange={(e) => { setLinkUrl(e.target.value); form.clear("link"); }} disabled={busy || imageCount > 0} placeholder="https://example.com" {...invalidProps("link", form.errors.link)} />
-          <FieldError id="link" message={form.errors.link} /></div>
+        {kind === "link" && <div className="field"><label htmlFor="link">Liên kết <span className="subtle">(bắt buộc)</span></label>
+          <input id="link" type="url" inputMode="url" autoComplete="off" autoCapitalize="none" spellCheck={false} value={linkUrl} onChange={(e) => { setLinkUrl(e.target.value); form.clear("link"); }} disabled={busy} placeholder="https://example.com" {...invalidProps("link", form.errors.link)} />
+          <FieldError id="link" message={form.errors.link} /></div>}
       </fieldset>
     </div>
 
@@ -240,7 +257,7 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
               </>}
         </fieldset>
 
-        <div role="alert">{error && <p className="error">{error}</p>}</div>
+        {error && <Toast kind="error" text={error} />}
         <FormSummary count={form.count} />
         <div className="form-footer sticky-actions">
           <p className="summary" aria-live="polite">{summary}</p>
@@ -250,7 +267,7 @@ export default function RepostForm({ id, modes, live, ambiguous, sourcePageId, i
         </div>
       </div>
 
-      <PostPreview pageName={firstPage} morePages={morePages} message={message} linkUrl={linkUrl} />
+      <PostPreview pageName={firstPage} morePages={morePages} message={message} linkUrl={effectiveLink} />
     </aside>
   </form>;
 }

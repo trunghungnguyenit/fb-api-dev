@@ -173,6 +173,29 @@ describe("files of finished posts", () => {
     expect(state(m.id)).toBe("purged");
   });
 
+  it("keeps the file when a re-post copies it after the job looked but before it deleted", async () => {
+    const published = post("published", { published_at: ago(10 * DAY) });
+    const draft = post("draft");
+    const original = media({ post_id: published.id, storage_path: "u1/shared/x.jpg" });
+    // The job reads the posts right after listing the file's rows: a copy appears at exactly that moment.
+    const realFrom = fake.from;
+    let copied = false;
+    fake.from = (table: string) => {
+      if (table === "posts" && !copied) {
+        copied = true;
+        media({ post_id: draft.id, storage_path: "u1/shared/x.jpg", created_at: ago(HOUR) });
+      }
+      return realFrom(table);
+    };
+    try {
+      const stats = await cleanupMedia({ now: NOW });
+      expect(stats).toMatchObject({ purgedFiles: 0, errors: 0 });
+    } finally { fake.from = realFrom; }
+    expect(removeObjects).not.toHaveBeenCalled();
+    expect(state(original.id)).toBe("uploaded"); // the claim was undone
+    expect(fake.tables.post_media.filter((m) => m.post_id === draft.id).every((m) => m.state === "uploaded")).toBe(true);
+  });
+
   it("pages through many rows without skipping any", async () => {
     const published = post("published", { published_at: ago(10 * DAY) });
     for (let i = 0; i < 130; i++) media({ post_id: published.id, created_at: ago(20 * DAY - i * 1000) });

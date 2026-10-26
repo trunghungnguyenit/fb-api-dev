@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
+import { tooManyFacebookReads } from "@/lib/rate-limit";
 import { one, userDb } from "@/lib/db";
 import { apiError, failureResponse } from "@/lib/api-error";
 import {
@@ -18,6 +19,8 @@ export const maxDuration = 30;
 export async function GET(_request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const user = await requireUser();
   if (!user) return apiError("UNAUTHENTICATED", 401);
+  const limited = tooManyFacebookReads(user.id);
+  if (limited) return limited;
   const { id } = await context.params;
   if (!z.string().uuid().safeParse(id).success) return apiError("POST_NOT_FOUND", 404);
 

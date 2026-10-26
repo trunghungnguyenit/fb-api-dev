@@ -6,7 +6,10 @@ import { describeMetaError } from "@/lib/meta/pages";
 import { APP_BUCKET, isRateLimitCode, LOCAL_RATE_LIMIT_CODE, USAGE_POLICY, usageTracker } from "@/lib/meta/usage";
 import { deactivatePage } from "@/lib/page-sync";
 import { messageFor, type ErrorCode } from "@/lib/errors";
-import { AMBIGUOUS_CODE, AMBIGUOUS_META_CODES, finalizePost, PublishError, requeue } from "@/lib/publish-state";
+import {
+  AMBIGUOUS_CODE, AMBIGUOUS_META_CODES, capTimeout, DeadlineError, finalizePost, FUNCTION_LIMIT_MS, MIN_SEND_MS, PublishError,
+  remainingMs, requeue, requireTime
+} from "@/lib/publish-state";
 import { runPublishPool, type PoolOutcome } from "@/lib/publish-pool";
 import { resolveProcessingPosts, runVideoPublish, type ResolveStats } from "@/lib/video-publish";
 import { notify } from "@/lib/notifications";
@@ -21,9 +24,15 @@ type PublishResult = { id: string; result: "published" | "failed" };
 // A post stuck in `publishing` longer than this is assumed orphaned (crash/timeout). Far above the worst
 // case of one run (budget + one 15s Meta call), so a live run is never reaped under its own feet.
 const STALE_PUBLISHING_MS = 10 * 60 * 1000;
-// Stop claiming new posts after this long. Budget + one slow publish (PUBLISH_TIMEOUT_MS) must stay under the
-// serverless maxDuration (60s), so a function is never killed mid-publish.
+// Stop claiming new posts after this long (counted from the start of the run, the video follow-up included).
 const DEFAULT_BUDGET_MS = 25_000;
+// Every call to Facebook is cut to the time left before the function limit (the `deadline` handed to publishPost),
+// and a step that cannot finish in time is not started: so a function is never killed after a request left.
+// Posts that need more time than a run has simply continue on the next run (photos already uploaded are reused).
+// The follow-up that looks at videos Facebook is processing may use at most this much of the run.
+const RESOLVE_BUDGET_MS = 10_000;
+// Below this much time left a new post is not even claimed (it stays queued for the next run).
+const MIN_START_MS = MIN_SEND_MS + 5_000;
 // How many due posts are fetched at a time; users take turns within each window (see publish-pool.ts).
 const CANDIDATE_WINDOW = 200;
 
@@ -86,7 +95,11 @@ function dueQuery(dueBeforeIso: string) {
  * Publishes ONE due post: claims it, sends it to Facebook and records the outcome. It reports what happened
  * (and whether its Page should be left alone for now) instead of throwing, so the scheduler can keep going.
  */
-export async function publishPost(post: DuePost): Promise<PoolOutcome> {
+export async function publishPost(post: DuePost, opts: { deadline?: number } = {}): Promise<PoolOutcome> {
+  const { deadline } = opts;
+  // No time to even start: leave it queued, untouched, for the next run.
+  if (remainingMs(deadline) < MIN_START_MS) return { result: "requeued" };
+
   // The conditional update is the atomic claim: only one worker can move scheduled -> publishing.
   const { data: claimed, error: claimError } = await supabaseAdmin.from("posts").update({
     status: "publishing", locked_at: new Date().toISOString(), sent_at: null,
@@ -141,7 +154,7 @@ export async function publishPost(post: DuePost): Promise<PoolOutcome> {
     let facebookPostId: string | undefined;
     if (post.post_type === "video" || post.post_type === "reel") {
       // Several steps on Facebook's side, and possibly minutes of processing: see video-publish.ts.
-      const outcome = await runVideoPublish({ post: { ...post, post_type: post.post_type }, pageFbId: page.page_id, token, markSent });
+      const outcome = await runVideoPublish({ post: { ...post, post_type: post.post_type }, pageFbId: page.page_id, token, markSent, deadline });
       if (outcome.result === "deferred") {
         // Facebook allows 30 Reels per Page per 24 hours: the post waits in the queue, nothing was created.
         await requeue(post.id, false, outcome.until);
@@ -163,8 +176,10 @@ export async function publishPost(post: DuePost): Promise<PoolOutcome> {
       else {
         for (const photo of photos) {
           if (photo.facebook_media_id) continue;
+          // Out of time: stop here, nothing public exists yet and the photos done so far are remembered for the next run.
+          requireTime(deadline, MIN_SEND_MS);
           const uploaded = await metaPost<{ id?: string }>(
-            ...graphArgs(unpublishedPhotoRequest(page.page_id, photo.url), token, PUBLISH_TIMEOUT_MS));
+            ...graphArgs(unpublishedPhotoRequest(page.page_id, photo.url), token, capTimeout(PUBLISH_TIMEOUT_MS, deadline)));
           if (!uploaded.id) throw new Error("Meta returned success without a photo id");
           photo.facebook_media_id = uploaded.id;
           await recordFacebookMediaId(photo.id, uploaded.id);
@@ -175,8 +190,9 @@ export async function publishPost(post: DuePost): Promise<PoolOutcome> {
       request = feedRequest(page.page_id, post);
     }
 
+    requireTime(deadline, MIN_SEND_MS);
     await markSent();
-    const result = await metaPost<{ id?: string; post_id?: string }>(...graphArgs(request, token, PUBLISH_TIMEOUT_MS));
+    const result = await metaPost<{ id?: string; post_id?: string }>(...graphArgs(request, token, capTimeout(PUBLISH_TIMEOUT_MS, deadline)));
     facebookPostId = createdPostId(result);
     }
     if (!facebookPostId) throw new Error("Meta returned success without a post id");
@@ -194,6 +210,13 @@ export async function publishPost(post: DuePost): Promise<PoolOutcome> {
   } catch (error) {
     const metaError = error instanceof MetaApiError ? error : null;
     const technical = error instanceof Error ? error.message : String(error);
+
+    // Ran out of time before anything was sent: back in the queue, the next run continues.
+    if (error instanceof DeadlineError && !sent) {
+      await requeue(post.id);
+      await closeAttempt({ outcome: "failure", error_code: "TIME_BUDGET" });
+      return { result: "requeued" };
+    }
 
     // Nothing was sent and the DB hiccuped: retry on the next tick rather than failing the post.
     if (error instanceof PublishError && (error.code === "DB_ERROR" || error.code === "MEDIA_STORAGE_ERROR")) {
@@ -280,22 +303,25 @@ const laneOf = (post: DuePost) => (post.post_type === "photos" || post.post_type
  * caller may run again right away.
  */
 export async function runPublishCycle(opts: { limit?: number; budgetMs?: number } = {}) {
+  const startedAt = Date.now();
+  const deadline = startedAt + FUNCTION_LIMIT_MS;
   await reapStalePosts();
   // Videos / Reels that Facebook was still processing earlier: finish the ones that are decided now. Never fatal here.
+  // Time-boxed: it counts against the run's budget like everything else.
   let videos: ResolveStats | null = null;
-  try { videos = await resolveProcessingPosts(); }
+  try { videos = await resolveProcessingPosts({ deadline: startedAt + RESOLVE_BUDGET_MS }); }
   catch (e) { console.error("resolving processing videos failed:", e); }
   const dueBefore = new Date().toISOString();
   const results: PublishResult[] = [];
   const stats = await runPublishPool<DuePost, DueCursor>({
     fetchBatch: (cursor) => fetchDueBatch(dueBefore, cursor),
     publish: async (post) => {
-      const outcome = await publishPost(post);
+      const outcome = await publishPost(post, { deadline });
       if (outcome.result === "published" || outcome.result === "failed") results.push({ id: post.id, result: outcome.result });
       return outcome;
     },
     concurrency: LANES, laneOf,
-    budgetMs: opts.budgetMs ?? DEFAULT_BUDGET_MS, limit: opts.limit,
+    budgetMs: (opts.budgetMs ?? DEFAULT_BUDGET_MS) - (Date.now() - startedAt), limit: opts.limit,
     // Meta has rate limited the whole app: every post would just be deferred again, so stop and try next tick.
     shouldPause: () => Boolean(usageTracker.gate(APP_BUCKET).blockedUntil)
   });
@@ -303,8 +329,10 @@ export async function runPublishCycle(opts: { limit?: number; budgetMs?: number 
 }
 
 /** Publishes due `scheduled` posts (or only one post by id, for "publish now" / retry). Returns what was done. */
-export async function processDuePosts(opts: { postId?: string; limit?: number; budgetMs?: number } = {}) {
+export async function processDuePosts(opts: { postId?: string; limit?: number; budgetMs?: number; deadline?: number } = {}) {
   if (!opts.postId) return (await runPublishCycle(opts)).results;
+  // The web request that called this has its own function limit: leave it a little for what it does around this call.
+  const deadline = opts.deadline ?? Date.now() + FUNCTION_LIMIT_MS - 3_000;
 
   // A single-post run must not trigger the global sweep, and ignores a rate-limit deferral: the local gate in
   // metaRequest still protects Meta and defers it again if the limit is really still on.
@@ -315,7 +343,7 @@ export async function processDuePosts(opts: { postId?: string; limit?: number; b
     // A video / Reel takes minutes (upload, then Facebook converts it): never inline in a web request. It stays queued
     // and the scheduler's heavy lane publishes it.
     if (post.post_type === "video" || post.post_type === "reel") continue;
-    const outcome = await publishPost(post);
+    const outcome = await publishPost(post, { deadline });
     if (outcome.result === "published" || outcome.result === "failed") results.push({ id: post.id, result: outcome.result });
   }
   return results;

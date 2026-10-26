@@ -13,7 +13,7 @@ import PostEditor, { type EditorImage } from "./post-editor";
 export const dynamic = "force-dynamic";
 
 type EditablePost = {
-  id: string; page_id: string; message: string; link_url: string | null; status: string;
+  id: string; page_id: string; message: string; link_url: string | null; post_type: string | null; status: string;
   scheduled_at: string | null; last_error_code: string | null; facebook_deleted_at: string | null; note: string | null;
 };
 
@@ -25,7 +25,7 @@ export default async function EditPostPage({ params }: { params: Promise<{ id: s
   const db = userDb(user.id);
 
   const [postResult, pagesResult] = await Promise.all([
-    db.posts.select("id,page_id,message,link_url,status,scheduled_at,last_error_code,facebook_deleted_at,note").eq("id", id).maybeSingle(),
+    db.posts.select("id,page_id,message,link_url,post_type,status,scheduled_at,last_error_code,facebook_deleted_at,note").eq("id", id).maybeSingle(),
     db.pages.select("id,page_name,is_active,removed_at").order("page_name")
   ]);
   if (postResult.error) throw new AppFailure("DB_ERROR", postResult.error);
@@ -68,6 +68,7 @@ export default async function EditPostPage({ params }: { params: Promise<{ id: s
         mode={published ? "published" : "unpublished"}
         status={post.status}
         ambiguous={post.last_error_code === "AMBIGUOUS"}
+        postType={post.post_type ?? "text"}
         initial={{ pageId: post.page_id, message: post.message, linkUrl: post.link_url ?? "", scheduledAt: post.scheduled_at, note: post.note ?? "" }}
         images={images}
         limits={clientLimits(mediaLimits)}

@@ -15,10 +15,12 @@ export type GraphComment = {
   parent?: { id?: string };
   permalink_url?: string;
   attachment?: { type?: string; url?: string };
+  /** Whether the viewer (the Page, with its own token) has liked the comment. */
+  user_likes?: boolean;
 };
 
 export const COMMENT_FIELDS_FULL =
-  "id,message,from{id,name},created_time,like_count,comment_count,is_hidden,can_hide,can_remove,can_comment,parent{id},permalink_url,attachment{type,url}";
+  "id,message,from{id,name},created_time,like_count,comment_count,is_hidden,can_hide,can_remove,can_comment,parent{id},permalink_url,attachment{type,url},user_likes";
 /** Fallback if Facebook refuses a field of the full list. */
 export const COMMENT_FIELDS_BASIC = "id,message,from{id,name},created_time,like_count,comment_count";
 
@@ -41,6 +43,10 @@ export type CommentView = {
   canHide: boolean;
   canRemove: boolean;
   canReply: boolean;
+  /** Written by the Fanpage itself (the only comments the app edits). */
+  byPage: boolean;
+  /** The Fanpage has liked it; null when Facebook did not say (then the screen must not guess). */
+  likedByPage: boolean | null;
   /** The comment this one answers; null for a top-level comment. */
   parentId: string | null;
   attachment: { type: string; url: string | null } | null;
@@ -53,8 +59,8 @@ function webUrl(url: unknown): string | null {
   try { return ["https:", "http:"].includes(new URL(url).protocol) ? url : null; } catch { return null; }
 }
 
-/** One Graph comment as what the page shows. null = unusable (no id). */
-export function mapComment(g: GraphComment): CommentView | null {
+/** One Graph comment as what the page shows. `pageId` is the Fanpage's Facebook id (tells its own comments). null = unusable (no id). */
+export function mapComment(g: GraphComment, pageId?: string): CommentView | null {
   if (!g || typeof g.id !== "string" || !COMMENT_ID_PATTERN.test(g.id)) return null;
   const created = g.created_time ? new Date(g.created_time) : null;
   return {
@@ -68,10 +74,12 @@ export function mapComment(g: GraphComment): CommentView | null {
     canHide: g.can_hide !== false,
     canRemove: g.can_remove !== false,
     canReply: g.can_comment !== false,
+    byPage: Boolean(pageId) && g.from?.id === pageId,
+    likedByPage: typeof g.user_likes === "boolean" ? g.user_likes : null,
     parentId: typeof g.parent?.id === "string" ? g.parent.id : null,
     attachment: g.attachment && typeof g.attachment.type === "string" ? { type: g.attachment.type, url: webUrl(g.attachment.url) } : null
   };
 }
 
-export const mapComments = (list: GraphComment[] | undefined) =>
-  (list ?? []).map(mapComment).filter((c): c is CommentView => c !== null);
+export const mapComments = (list: GraphComment[] | undefined, pageId?: string) =>
+  (list ?? []).map((g) => mapComment(g, pageId)).filter((c): c is CommentView => c !== null);

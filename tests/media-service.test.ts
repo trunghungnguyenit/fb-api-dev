@@ -256,4 +256,57 @@ describe("applyMedia", () => {
     media().find((m) => m.id === a.id)!.post_id = "someone-elses-post"; // lost the race
     await expect(applyMedia(db(), "post-1", resolved)).rejects.toBeInstanceOf(MediaConflict);
   });
+
+  it("is all or nothing: a conflict half-way leaves the post with the media it had", async () => {
+    const keep = seedMedia({ post_id: "post-1", position: 0 });
+    const drop = seedMedia({ post_id: "post-1", position: 1 });
+    const added = seedMedia();
+    const stolen = seedMedia();
+    const resolved = await resolve([{ id: added.id }, { id: keep.id }, { id: stolen.id }], "post-1");
+    media().find((m) => m.id === stolen.id)!.post_id = "someone-elses-post"; // lost the race on the last file
+
+    await expect(applyMedia(db(), "post-1", resolved)).rejects.toBeInstanceOf(MediaConflict);
+
+    expect(media().find((m) => m.id === drop.id)).toMatchObject({ post_id: "post-1", position: 1 }); // not detached
+    expect(media().find((m) => m.id === keep.id)).toMatchObject({ post_id: "post-1", position: 0 }); // order restored
+    expect(media().find((m) => m.id === added.id)).toMatchObject({ post_id: null }); // not left half-attached
+    expect(media().find((m) => m.id === stolen.id)).toMatchObject({ post_id: "someone-elses-post" });
+  });
+
+  it("is all or nothing: a failure while detaching also takes back the new files and copies", async () => {
+    const drop = seedMedia({ post_id: "post-1", position: 0 });
+    const added = seedMedia();
+    const source = seedMedia({ post_id: "post-9", storage_path: "u1/shared/y.jpg" });
+    const resolved = await resolve([{ id: added.id }, { id: source.id, clone: true }], "post-1");
+    // The detach is the only update without a `state` filter: make that one fail.
+    const realFrom = fake.from;
+    fake.from = (table: string) => {
+      const q = realFrom(table) as unknown as { update: (p: Record<string, unknown>) => unknown; in: (c: string, v: unknown[]) => unknown };
+      const update = q.update.bind(q);
+      q.update = (patch) => {
+        const query = update(patch) as { in: (c: string, v: unknown[]) => unknown };
+        if (patch.post_id === null && patch.position === 0) {
+          const inFn = query.in.bind(query);
+          query.in = (c, v) => (v.includes(drop.id) ? Promise.resolve({ data: null, error: { message: "db down" } }) : inFn(c, v));
+        }
+        return query;
+      };
+      return q as ReturnType<typeof realFrom>;
+    };
+    try {
+      await expect(applyMedia(db(), "post-1", resolved)).rejects.toMatchObject({ message: "db down" });
+    } finally { fake.from = realFrom; }
+
+    expect(media().find((m) => m.id === drop.id)).toMatchObject({ post_id: "post-1" });
+    expect(media().find((m) => m.id === added.id)).toMatchObject({ post_id: null });
+    expect(media().filter((m) => m.post_id === "post-1")).toHaveLength(1); // the copy of `source` is gone again
+  });
+
+  it("refuses to copy a file the cleanup job has just purged, and leaves no copy behind", async () => {
+    const source = seedMedia({ post_id: "post-1", storage_path: "u1/shared/x.jpg" });
+    const resolved = await resolve([{ id: source.id, clone: true }]);
+    media().find((m) => m.id === source.id)!.state = "purged";
+    await expect(applyMedia(db(), "post-2", resolved)).rejects.toBeInstanceOf(MediaConflict);
+    expect(media().filter((m) => m.post_id === "post-2")).toHaveLength(0);
+  });
 });

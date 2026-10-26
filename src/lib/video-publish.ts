@@ -13,7 +13,10 @@ import { dedupeKeys } from "@/lib/notification-text";
 import { notify } from "@/lib/notifications";
 import { deactivatePage } from "@/lib/page-sync";
 import { messageFor } from "@/lib/errors";
-import { AMBIGUOUS_CODE, AMBIGUOUS_META_CODES, closeLatestAttempt, finalizePost, PublishError, requeue, sleep } from "@/lib/publish-state";
+import {
+  AMBIGUOUS_CODE, AMBIGUOUS_META_CODES, capTimeout, closeLatestAttempt, finalizePost, MIN_SEND_MS, PublishError, remainingMs,
+  requeue, requireTime, SAFETY_MS, sleep
+} from "@/lib/publish-state";
 
 // Publishing a video or a Reel is several steps on Facebook's side and can take minutes, so it does not fit the
 // "one request, one answer" shape of a text post. A post goes through these states (publish_phase on the post):
@@ -29,7 +32,12 @@ import { AMBIGUOUS_CODE, AMBIGUOUS_META_CODES, closeLatestAttempt, finalizePost,
 /** Facebook allows 30 API-published Reels per Page per 24 hours (Reels publishing guide). */
 export const REELS_PER_DAY = 30;
 const REELS_DEFER_MS = 30 * 60 * 1000;
+// Wanted timeouts; each call is cut to the time left before the run's deadline (see capTimeout), so on a 60 s function
+// a slow upload fails cleanly instead of the whole function being killed after the request left.
 const UPLOAD_TIMEOUT_MS = 120_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+/** The least time worth starting a video / Reel for: a new upload session, or a file handed to Facebook. */
+const MIN_START_MS = 30_000;
 /** Right after publishing, look a few times (about 15 s) so a small video is finished in the same run. */
 const INLINE_POLL_TRIES = 5;
 const INLINE_POLL_STEP_MS = 3_000;
@@ -91,8 +99,10 @@ async function reelsInLast24h(pageRowId: string) {
  */
 export async function runVideoPublish(ctx: {
   post: VideoPost; pageFbId: string; token: string; markSent: () => Promise<void>; mode?: "hosted" | "binary"; pollInline?: boolean;
+  /** Epoch ms by which this function must be done (see publish-state.ts). A step that cannot fit throws DeadlineError before sending. */
+  deadline?: number;
 }): Promise<VideoResult> {
-  const { post, pageFbId, token } = ctx;
+  const { post, pageFbId, token, deadline } = ctx;
   const mode = ctx.mode ?? env.META_VIDEO_UPLOAD_MODE;
 
   let files;
@@ -103,12 +113,17 @@ export async function runVideoPublish(ctx: {
 
   let videoId: string;
   if (post.post_type === "video") {
+    requireTime(deadline, MIN_START_MS);
+    // The bytes are fetched BEFORE the post is marked as sent: a failed download proves nothing reached Facebook.
+    const bytes = mode === "binary" ? await downloadObject(file.storage_path, capTimeout(UPLOAD_TIMEOUT_MS, deadline)) : null;
+    requireTime(deadline, MIN_SEND_MS);
     await ctx.markSent(); // the request below creates the post, so from here on the outcome can be unknown
     const fields: Record<string, string> = post.message ? { description: post.message } : {};
-    const created = mode === "binary"
+    const timeout = capTimeout(UPLOAD_TIMEOUT_MS, deadline);
+    const created = bytes
       ? await metaPostVideoFile<{ id?: string }>(`${pageFbId}/videos`, token, fields,
-          { name: file.storage_path.split("/").pop() ?? "video", type: file.mime, data: await downloadObject(file.storage_path) }, UPLOAD_TIMEOUT_MS)
-      : await metaPost<{ id?: string }>(`${pageFbId}/videos`, token, { file_url: file.url, ...fields }, UPLOAD_TIMEOUT_MS);
+          { name: file.storage_path.split("/").pop() ?? "video", type: file.mime, data: bytes }, timeout)
+      : await metaPost<{ id?: string }>(`${pageFbId}/videos`, token, { file_url: file.url, ...fields }, timeout);
     if (!created.id) throw new Error("Meta returned success without a video id");
     videoId = created.id;
   } else {
@@ -116,8 +131,10 @@ export async function runVideoPublish(ctx: {
     let uploadUrl: string | undefined;
     if (post.facebook_video_id) videoId = post.facebook_video_id;
     else {
+      requireTime(deadline, MIN_START_MS);
       if ((await reelsInLast24h(post.page_id)) > REELS_PER_DAY) return { result: "deferred", until: Date.now() + REELS_DEFER_MS };
-      const started = await metaPost<{ video_id?: string; upload_url?: string }>(`${pageFbId}/video_reels`, token, { upload_phase: "start" });
+      const started = await metaPost<{ video_id?: string; upload_url?: string }>(
+        `${pageFbId}/video_reels`, token, { upload_phase: "start" }, capTimeout(REQUEST_TIMEOUT_MS, deadline));
       if (!started.video_id) throw new Error("Meta returned success without a video id");
       videoId = started.video_id;
       uploadUrl = started.upload_url;
@@ -139,15 +156,19 @@ export async function runVideoPublish(ctx: {
     }
     if (!alreadyUploaded) {
       const target = uploadUrl && isMetaUploadUrl(uploadUrl) ? uploadUrl : reelUploadUrl(videoId);
-      if (mode === "binary") await metaUploadBytes(target, token, await downloadObject(file.storage_path), UPLOAD_TIMEOUT_MS);
-      else await metaUploadFromUrl(target, token, file.url, UPLOAD_TIMEOUT_MS);
+      requireTime(deadline, MIN_SEND_MS); // the session is kept: the next attempt resumes it
+      if (mode === "binary") {
+        const bytes = await downloadObject(file.storage_path, capTimeout(UPLOAD_TIMEOUT_MS, deadline));
+        await metaUploadBytes(target, token, bytes, capTimeout(UPLOAD_TIMEOUT_MS, deadline));
+      } else await metaUploadFromUrl(target, token, file.url, capTimeout(UPLOAD_TIMEOUT_MS, deadline));
     }
 
+    requireTime(deadline, REQUEST_TIMEOUT_MS); // nothing public yet: out of time here means "resume next run", not "unknown"
     await ctx.markSent(); // the finish call publishes the Reel
     try {
       await metaPost(`${pageFbId}/video_reels`, token, {
         upload_phase: "finish", video_id: videoId, video_state: "PUBLISHED", ...(post.message ? { description: post.message } : {})
-      });
+      }, capTimeout(REQUEST_TIMEOUT_MS, deadline));
     } catch (e) {
       // A clean rejection proves nothing was published. A timeout does not, but we hold the video id, so Facebook can
       // tell us: carry on as "processing" and let the status decide.
@@ -160,6 +181,8 @@ export async function runVideoPublish(ctx: {
   if (ctx.pollInline === false) return { result: "processing" };
 
   for (let attempt = 0; attempt < INLINE_POLL_TRIES; attempt++) {
+    // Looking is optional (the follow-up job does it too): never spend the time the function does not have.
+    if (remainingMs(deadline) < INLINE_POLL_STEP_MS + REQUEST_TIMEOUT_MS + SAFETY_MS) break;
     await sleep(INLINE_POLL_STEP_MS);
     let progress: VideoProgress;
     try { progress = await fetchProgress(videoId, token, post.post_type); }
@@ -262,7 +285,7 @@ async function resolveOne(row: ProcessingRow, now: Date): Promise<keyof ResolveS
  * Looks at the posts whose video / Reel Facebook is still processing (or whose Reel upload was abandoned) and
  * finishes the ones that are decided. Safe to call as often as you like: a post is looked at at most every 15 seconds.
  */
-export async function resolveProcessingPosts(opts: { limit?: number; concurrency?: number; now?: Date } = {}): Promise<ResolveStats> {
+export async function resolveProcessingPosts(opts: { limit?: number; concurrency?: number; now?: Date; deadline?: number } = {}): Promise<ResolveStats> {
   const now = opts.now ?? new Date();
   const stats: ResolveStats = { checked: 0, published: 0, failed: 0, resumed: 0, unknown: 0, waiting: 0 };
   const lookedBefore = new Date(now.getTime() - POLL_MIN_INTERVAL_MS).toISOString();
@@ -275,6 +298,8 @@ export async function resolveProcessingPosts(opts: { limit?: number; concurrency
 
   async function worker() {
     for (let row = queue.shift(); row; row = queue.shift()) {
+      // Out of time: the rows left are looked at next run (the query puts the longest-unchecked first).
+      if (opts.deadline !== undefined && Date.now() >= opts.deadline) break;
       try { stats[await resolveOne(row, now)]++; }
       catch (e) { console.error(`resolving post ${row.id} failed:`, e); stats.waiting++; }
       stats.checked++;

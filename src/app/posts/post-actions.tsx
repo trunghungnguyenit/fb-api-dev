@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { FieldError, invalidProps } from "@/app/form-field";
 import { usePostActions } from "./use-post-actions";
+import { Toast } from "@/app/toast";
 
 type Props = { id: string; status: string; lastErrorCode: string | null };
 
@@ -35,6 +36,6 @@ export default function PostActions({ id, status, lastErrorCode }: Props) {
       </div>
       <FieldError id="post-schedule" message={scheduleError} />
     </div>}
-    {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
+    {error && <Toast kind="error" text={error} />}
   </div>;
 }

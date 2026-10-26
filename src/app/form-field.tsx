@@ -38,7 +38,7 @@ export function useFieldErrors() {
 /** After the messages are on screen, takes the keyboard (and, on a phone, the screen) to the first wrong field. */
 export function focusFirstInvalid(root?: ParentNode | null) {
   requestAnimationFrame(() => {
-    const el = (root ?? document).querySelector<HTMLElement>('[aria-invalid="true"]');
+    const el = (root ?? document).querySelector<HTMLElement>('[aria-invalid="true"], [data-invalid="true"]');
     el?.focus();
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   });

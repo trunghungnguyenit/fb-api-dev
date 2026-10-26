@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { one, rows, userDb } from "@/lib/db";
 import { apiError, invalidFields, failureResponse } from "@/lib/api-error";
+import { publicPost, publicPosts } from "@/lib/post-public";
 import { isSameOrigin } from "@/lib/csrf";
 import { AMBIGUOUS_CODE } from "@/lib/publisher";
 import { logError, messageFor, newRef } from "@/lib/errors";
@@ -166,7 +167,7 @@ async function sameRow(db: Db, userId: string, source: Source, pageId: string, c
 
   await recordEvent(userId, source.id, "republished");
   if (when === "now") await publishInline([source.id]);
-  return NextResponse.json({ posts: await fetchPosts(db, [source.id]), warnings: [] });
+  return NextResponse.json({ posts: publicPosts(await fetchPosts(db, [source.id])), warnings: [] });
 }
 
 /** New row(s), one per Fanpage; the original is untouched. */
@@ -180,7 +181,7 @@ async function cloneToPages(db: Db, root: string, pageIds: string[], content: Co
     await db.posts.update({ ...repostSchedule(when), updated_at: new Date().toISOString() }).in("id", ids).eq("status", "draft");
   }
   if (when === "now") await publishInline(ids);
-  return NextResponse.json({ posts: await fetchPosts(db, ids), warnings: [] });
+  return NextResponse.json({ posts: publicPosts(await fetchPosts(db, ids)), warnings: [] });
 }
 
 /**
@@ -217,7 +218,7 @@ async function replace(db: Db, userId: string, source: Source, root: string, con
         warnings.push({ code: "REPLACE_OLD_NOT_DELETED", message: messageFor("REPLACE_OLD_NOT_DELETED") });
       }
     }
-    return NextResponse.json({ posts: [fresh], warnings });
+    return NextResponse.json({ posts: [publicPost(fresh)], warnings });
   }
 
   // The new post did not go out. Facebook said "duplicate" before creating anything, so the throw-away
@@ -231,5 +232,5 @@ async function replace(db: Db, userId: string, source: Source, root: string, con
   const code = fresh?.last_error_code ?? "PUBLISH_FAILED";
   const ref = newRef();
   logError("PUBLISH_FAILED", ref, `replace: new post ended as ${fresh?.status} (${code})`, "warn");
-  return NextResponse.json({ error: messageFor(code, "PUBLISH_FAILED"), code, ref, posts: fresh ? [fresh] : [] }, { status: 422 });
+  return NextResponse.json({ error: messageFor(code, "PUBLISH_FAILED"), code, ref, posts: fresh ? [publicPost(fresh)] : [] }, { status: 422 });
 }

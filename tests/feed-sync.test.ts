@@ -8,8 +8,10 @@ const deactivatePage = vi.fn();
 vi.mock("@/lib/supabase/admin", () => ({ supabaseAdmin: { from: (t: string) => fake.from(t) } }));
 vi.mock("@/lib/crypto", () => ({ decryptSecret: (v: string) => `token-of-${v}`, encryptSecret: (v: string) => v }));
 vi.mock("@/lib/page-sync", () => ({ deactivatePage: (...a: unknown[]) => deactivatePage(...a) }));
+// The count of ratings the sync also asks for has its own tests (new-ratings.test.ts): here it is answered with nothing and not counted.
 vi.mock("@/lib/meta/client", async (original) => ({
-  ...(await original<typeof import("@/lib/meta/client")>()), metaGet: (...a: unknown[]) => metaGet(...a)
+  ...(await original<typeof import("@/lib/meta/client")>()),
+  metaGet: (...a: unknown[]) => ((a[2] as { fields?: string } | undefined)?.fields === "rating_count" ? Promise.resolve({}) : metaGet(...a))
 }));
 
 import { fetchFeedWindow, syncDueFeeds, syncPageFeed, syncPageNow, syncUserFeedsNow, type FeedPage } from "@/lib/feed-sync";

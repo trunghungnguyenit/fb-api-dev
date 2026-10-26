@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useConfirm } from "@/app/confirm-dialog";
 import { callApi, userMessage } from "@/lib/client-api";
+import { Toast } from "@/app/toast";
 
 // Actions for a Fanpage the user removed: bring it back, or (only when it has no posts) delete it for good.
 export default function RemovedPageActions({ pageId, pageName, canDelete }: { pageId: string; pageName: string; canDelete: boolean }) {
@@ -33,6 +34,6 @@ export default function RemovedPageActions({ pageId, pageName, canDelete }: { pa
       <button type="button" className="btn small primary" disabled={busy !== null} onClick={() => void run("restore")}>{busy === "restore" ? "Đang kết nối…" : "Kết nối lại"}</button>
       {canDelete && <button type="button" className="btn small danger" disabled={busy !== null} onClick={() => void run("delete")}>{busy === "delete" ? "Đang xóa…" : "Xóa hẳn"}</button>}
     </div>
-    {error && <p className="row-error" role="alert" style={{ maxWidth: 320 }}>{error}</p>}
+    {error && <Toast kind="error" text={error} />}
   </div>;
 }

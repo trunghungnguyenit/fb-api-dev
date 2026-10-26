@@ -120,4 +120,25 @@ describe("bulk re-post", () => {
     const photoCopy = copies.find((c) => c.post_type === "photo")!;
     expect(fake.tables.post_media.filter((m) => m.post_id === photoCopy.id)).toHaveLength(1);
   });
+
+  it("creates nothing when attaching the images fails, so a retry cannot duplicate the text-only copies", async () => {
+    seedSource("photo", [{}]);
+    const text = uuid(902);
+    fake.tables.posts.push({ id: text, user_id: "u1", page_id: PAGE, message: "chỉ chữ", link_url: null, status: "failed", post_type: "text",
+      facebook_post_id: null, facebook_deleted_at: null, last_error_code: "FB_REJECTED", reposted_from: null, created_at: "2026-10-01T00:00:00Z" });
+    // The cleanup job purges the original's file just after the draft copies were inserted.
+    const realFrom = fake.from;
+    fake.from = (table: string) => {
+      if (table === "post_media" && fake.tables.posts.some((p) => p.reposted_from)) {
+        for (const m of fake.tables.post_media) m.state = "purged";
+      }
+      return realFrom(table);
+    };
+    try {
+      const res = await bulkCall([SOURCE, text], "now");
+      expect(res.status).toBe(500);
+    } finally { fake.from = realFrom; }
+    expect(fake.tables.posts.filter((p) => p.reposted_from)).toHaveLength(0); // neither the image copy nor the text copy
+    expect(processDuePosts).not.toHaveBeenCalled();
+  });
 });

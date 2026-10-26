@@ -26,7 +26,14 @@ export type FacebookPostRef = { id: string; page_id: string; facebook_post_id: s
 const isVideoPost = (post: FacebookPostRef) => post.post_type === "video" || post.post_type === "reel";
 
 /** Graph gives a video's permalink as a path ("/page/videos/123/"); make it a link. */
-const absoluteUrl = (url: string | undefined) => (url ? (url.startsWith("/") ? `https://www.facebook.com${url}` : url) : null);
+// Only a web address is ever made a link: anything else Facebook might send (javascript:, data:) becomes no link.
+export const absoluteUrl = (url: string | undefined) => {
+  if (!url) return null;
+  try {
+    const full = new URL(url, "https://www.facebook.com");
+    return full.protocol === "https:" || full.protocol === "http:" ? full.toString() : null;
+  } catch { return null; }
+};
 
 /** Best-effort audit log: never throws, never stores content or tokens. */
 export async function recordEvent(userId: string, postId: string, type: PostEventType, errorCode?: string | null) {
@@ -54,6 +61,8 @@ export function classifyFacebookError(error: unknown, op: "read" | "edit" | "del
     if (isGoneError(error)) return new FacebookActionError(op === "comment" ? "COMMENT_GONE" : "FB_POST_GONE", true, error);
     const code = describeMetaError(error);
     if (op === "comment" && code === "FB_PERMISSION_DENIED") return new FacebookActionError("COMMENTS_PERMISSION_DENIED", false, error);
+    // The generic refusals (also code 100, the usual one for a comment that cannot be liked or edited) talk about posts; for a comment it must talk about the comment.
+    if (op === "comment" && (code === "FB_REJECTED" || code === "FB_CONTENT_REJECTED")) return new FacebookActionError("COMMENT_REJECTED", false, error);
     if (op === "delete" && (code === "FB_PERMISSION_DENIED" || code === "FB_REJECTED")) {
       return new FacebookActionError("FB_DELETE_NOT_ALLOWED", false, error);
     }
@@ -76,6 +85,23 @@ async function pageToken(userId: string, pageRowId: string) {
 }
 
 /**
+ * Failures the user is told about and fixes themselves (a permission to grant, a Page without that section, a post that is gone).
+ * They are an answer, not a fault of the app, so they are logged as a warning: an error log (and the error screen of the dev
+ * server) is for what nobody expected.
+ */
+const EXPECTED_FAILURES = new Set<ErrorCode>([
+  "GUEST_PERMISSION_DENIED", "GUEST_SCOPES_MISSING", "GUEST_POSTS_UNAVAILABLE", "RATINGS_UNAVAILABLE", "COMMENTS_PERMISSION_DENIED",
+  "COMMENTS_SCOPES_MISSING", "COMMENT_GONE", "COMMENT_NOT_OWN", "INSIGHTS_PERMISSION_DENIED", "INSIGHTS_SCOPES_MISSING", "INSIGHTS_NO_ANALYZE",
+  "INSIGHTS_POST_UNAVAILABLE", "REACTIONS_PERMISSION_DENIED", "REACTIONS_POST_UNAVAILABLE", "FB_POST_GONE", "FB_PERMISSION_DENIED"
+]);
+
+/** What Facebook said, as one line of data: the wrapper's own cause when there is one (so the log shows Facebook's answer, not our wrapper). */
+function whatFacebookSaid(e: unknown) {
+  const source = e instanceof FacebookActionError && e.cause !== undefined ? e.cause : e;
+  return source instanceof MetaApiError ? { code: source.code, subcode: source.subcode, trace: source.traceId, message: source.message } : source;
+}
+
+/**
  * Runs `fn` with the Page's own token. Any failure becomes a FacebookActionError with a user-facing code; a dead token
  * switches the Page off (its queued posts stay queued), same as the publisher does. `what` only labels the log line.
  */
@@ -88,8 +114,7 @@ export async function runWithPageToken<T>(
   } catch (e) {
     const failure = classifyFacebookError(e, op);
     if (failure.code === "PAGE_PERMISSION_LOST") await deactivatePage(userId, pageRowId);
-    console.error(`facebook ${op} failed for ${what} (${failure.code}):`,
-      e instanceof MetaApiError ? { code: e.code, subcode: e.subcode, trace: e.traceId, message: e.message } : e);
+    (EXPECTED_FAILURES.has(failure.code) ? console.warn : console.error)(`facebook ${op} failed for ${what} (${failure.code}):`, whatFacebookSaid(e));
     throw failure;
   }
 }

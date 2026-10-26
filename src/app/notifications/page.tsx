@@ -6,6 +6,7 @@ import { formatDateTime } from "@/lib/labels";
 import { listNotifications } from "@/lib/notifications";
 import { describeNotification } from "@/lib/notification-text";
 import ClearQuery from "../clear-query";
+import { Toast } from "../toast";
 
 export const dynamic = "force-dynamic";
 
@@ -26,7 +27,7 @@ export default async function NotificationsPage({ searchParams }: { searchParams
       </div>
     </header>
     {error && <ClearQuery />}
-    {error && <p className="error" role="alert">{withRef(messageFor(error), ref && REF_PATTERN.test(ref) ? ref : null)}</p>}
+    {error && <Toast kind="error" text={withRef(messageFor(error), ref && REF_PATTERN.test(ref) ? ref : null)} />}
 
     <section className="panel">
       {notifications.length === 0

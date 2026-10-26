@@ -22,15 +22,15 @@ export default async function NewPostPage({ searchParams }: { searchParams: Prom
   const pages = rows<{ id: string; page_name: string }>(data);
 
   // "Nhân bản": start from an existing post's content (a post of this user only; anything else is ignored).
-  let initial: { pageId: string; message: string; linkUrl: string; images?: InitialImage[]; imagesNotice?: string } | undefined;
+  let initial: { pageId: string; message: string; linkUrl: string; postType?: string; images?: InitialImage[]; imagesNotice?: string } | undefined;
   if (from && z.string().uuid().safeParse(from).success) {
-    const { data: source, error: sourceError } = await db.posts.select("page_id,message,link_url").eq("id", from).maybeSingle();
+    const { data: source, error: sourceError } = await db.posts.select("page_id,message,link_url,post_type").eq("id", from).maybeSingle();
     if (sourceError) throw new AppFailure("DB_ERROR", sourceError);
-    const post = one<{ page_id: string; message: string; link_url: string | null }>(source);
+    const post = one<{ page_id: string; message: string; link_url: string | null; post_type: string | null }>(source);
     if (post) initial = {
       // Keep the original Page when it is still connected, otherwise let the user pick one.
       pageId: pages.some((p) => p.id === post.page_id) ? post.page_id : (pages[0]?.id ?? ""),
-      message: post.message, linkUrl: post.link_url ?? ""
+      message: post.message, linkUrl: post.link_url ?? "", postType: post.post_type ?? undefined
     };
     if (post && initial) {
       // The source's images: the new post gets copies of the entries (the stored files are shared).

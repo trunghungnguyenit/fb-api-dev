@@ -8,8 +8,11 @@ import { repostModes } from "@/lib/repost";
 import { attemptText, eventLabel, facebookPostUrl, formatDateTime, postErrorText, statusLabel, truncate } from "@/lib/labels";
 import { mediaOfPosts } from "@/lib/media/service";
 import { signedUrls } from "@/lib/media/storage";
+import { markCommentsSeen } from "@/lib/new-comments";
 import CommentsPanel from "../comments-panel";
 import FacebookStats from "../facebook-stats";
+import PostInsights from "../post-insights";
+import PostReactions from "../post-reactions";
 import PostActions from "../post-actions";
 import PostDangerActions from "../post-danger-actions";
 import StatusPill, { postTone } from "@/app/status-pill";
@@ -45,6 +48,8 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
   if (postResult.error) throw new AppFailure("DB_ERROR", postResult.error);
   const post = one<PostDetail>(postResult.data);
   if (!post) notFound();
+  // Opening a published post counts as having seen its comments (clears the "N mới" mark and the notification).
+  if (post.status === "published") await markCommentsSeen(user.id, { postId: post.id });
   if (attemptsResult.error) throw new AppFailure("DB_ERROR", attemptsResult.error);
   if (eventsResult.error) throw new AppFailure("DB_ERROR", eventsResult.error);
 
@@ -150,6 +155,16 @@ export default async function PostDetailPage({ params }: { params: Promise<{ id:
             ? <p className="notice">Fanpage này đã được gỡ khỏi ứng dụng nên chưa xem được số liệu, sửa hay xóa bài trên Facebook. <Link href="/pages">Kết nối lại Fanpage</Link> để dùng lại.</p>
             : <FacebookStats postId={post.id} fallbackUrl={facebookPostUrl(post.facebook_post_id)} markedDeleted={deleted} />}
         </section>)}
+
+    {published && post.facebook_post_id && !deleted && !pageRemoved && <section className="panel" aria-labelledby="post-reactions">
+      <h2 id="post-reactions">Cảm xúc theo loại</h2>
+      <PostReactions kind="app" id={post.id} />
+    </section>}
+
+    {published && post.facebook_post_id && !deleted && !pageRemoved && <section className="panel" aria-labelledby="post-insights">
+      <h2 id="post-insights">Insights của bài</h2>
+      <PostInsights kind="app" id={post.id} />
+    </section>}
 
     {published && post.facebook_post_id && !deleted && !pageRemoved && <section className="panel" aria-labelledby="comments">
       <h2 id="comments">Bình luận</h2>
