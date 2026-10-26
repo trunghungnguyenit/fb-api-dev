@@ -12,6 +12,9 @@ export function pageWindow(current: number, total: number): (number | null)[] {
   return out;
 }
 
+/** "Xem thêm" (phones): the next page added below what is shown. `remaining` = how many are still hidden. */
+export type MoreLink = { href: string; remaining: number; total: number };
+
 type Props = {
   current: number;
   totalPages: number;
@@ -20,12 +23,20 @@ type Props = {
   /** The jump form is a plain GET to `action` carrying these query parameters (the filters and the tab). */
   action: string;
   params: Record<string, string>;
+  /** On a phone the page numbers give way to one "Xem thêm" button (the numbers stay on a computer). */
+  more?: MoreLink;
 };
 
 /** Previous / numbers / jump-to-page (checked in the browser) / next, under the table. */
-export default function Pagination({ current, totalPages, href, action, params }: Props) {
+export default function Pagination({ current, totalPages, href, action, params, more }: Props) {
   if (totalPages <= 1) return null;
-  return <nav className="neo-pager" aria-label="Phân trang">
+  return <>
+    {more && <div className="pager-more">
+      {more.remaining > 0
+        ? <Link className="btn" href={more.href} scroll={false} rel="next">Xem thêm ({more.remaining.toLocaleString("vi-VN")} còn lại)</Link>
+        : <p className="subtle">Đã hiện hết {more.total.toLocaleString("vi-VN")}.</p>}
+    </div>}
+    <nav className={`neo-pager${more ? " pager-numbers" : ""}`} aria-label="Phân trang">
     {current > 1 ? <Link className="page-btn" href={href(current - 1)} rel="prev">← Trước</Link> : <span className="page-btn is-disabled" aria-disabled="true">← Trước</span>}
     <ul className="page-list">
       {pageWindow(current, totalPages).map((n, i) => <li key={n ?? `gap-${i}`}>
@@ -35,5 +46,6 @@ export default function Pagination({ current, totalPages, href, action, params }
     </ul>
     <JumpForm current={current} totalPages={totalPages} action={action} params={params} />
     {current < totalPages ? <Link className="page-btn" href={href(current + 1)} rel="next">Sau →</Link> : <span className="page-btn is-disabled" aria-disabled="true">Sau →</span>}
-  </nav>;
+  </nav>
+  </>;
 }

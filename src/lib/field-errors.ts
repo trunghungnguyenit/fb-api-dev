@@ -16,15 +16,15 @@ const count = (n: number) => n.toLocaleString("vi-VN");
 
 /** The text of a post. `required`: false for a post that has images or a video (a caption is optional then). */
 export function checkMessage(text: string, opts: { required: boolean }): string | null {
-  if (opts.required && !text.trim()) return "Nhập nội dung bài viết (hoặc chọn ảnh/video để đăng không cần chữ).";
+  if (opts.required && !text.trim()) return "Nhập nội dung bài viết.";
   if (text.length > MESSAGE_MAX) return `Nội dung dài quá ${count(MESSAGE_MAX)} ký tự (đang có ${count(text.length)}).`;
   return null;
 }
 
-/** An optional link: http or https only. */
-export function checkLink(text: string): string | null {
+/** A link: http or https only. Optional unless `required` (the "Bài viết + Liên kết" kind). */
+export function checkLink(text: string, opts: { required?: boolean } = {}): string | null {
   const value = text.trim();
-  if (!value) return null;
+  if (!value) return opts.required ? "Nhập liên kết cần đăng kèm, ví dụ https://ten-mien.com/bai-viet." : null;
   if (value.length > LINK_MAX) return `Liên kết dài quá ${count(LINK_MAX)} ký tự.`;
   try {
     const url = new URL(value);
@@ -34,6 +34,12 @@ export function checkLink(text: string): string | null {
   } catch {
     return "Liên kết không hợp lệ. Ví dụ đúng: https://ten-mien.com/bai-viet.";
   }
+}
+
+/** The files of a post of a kind that carries files: how many were chosen (and fully uploaded) against what the kind needs. */
+export function checkMedia(kind: "images" | "video" | "reel", count: number): string | null {
+  if (count > 0) return null;
+  return kind === "images" ? "Chọn ít nhất một ảnh." : kind === "video" ? "Chọn một video." : "Chọn một video dọc cho Reels.";
 }
 
 /** A <input type="datetime-local"> value (local time of the browser). Empty is fine unless `required`. */
@@ -53,6 +59,13 @@ export function checkNote(text: string): string | null {
 export function checkReply(text: string): string | null {
   if (!text.trim()) return "Nhập nội dung trả lời.";
   if (text.length > REPLY_MAX) return `Nội dung trả lời dài quá ${count(REPLY_MAX)} ký tự (đang có ${count(text.length)}).`;
+  return null;
+}
+
+/** The new text of a comment the Fanpage is editing. */
+export function checkCommentEdit(text: string): string | null {
+  if (!text.trim()) return "Nhập nội dung bình luận.";
+  if (text.length > REPLY_MAX) return `Nội dung bình luận dài quá ${count(REPLY_MAX)} ký tự (đang có ${count(text.length)}).`;
   return null;
 }
 

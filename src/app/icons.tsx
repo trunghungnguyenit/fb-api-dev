@@ -30,3 +30,13 @@ export const IconFeather = () => <Icon><path d="M20.2 3.8a6 6 0 0 0-8.5 0L5 10.5
 export const IconHome = () => <Icon><path d="M3 11.5 12 4l9 7.5" /><path d="M5 10v10h14V10" /></Icon>;
 export const IconUpload = () => <Icon><path d="M12 16V4" /><path d="m7 9 5-5 5 5" /><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3" /></Icon>;
 export const IconSliders = () => <Icon><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0" /><circle cx="16" cy="6" r="2" /><circle cx="10" cy="12" r="2" /><circle cx="18" cy="18" r="2" /></Icon>;
+
+// The five kinds of post (see lib/post-kind.ts).
+export const IconKindText = () => <Icon size={20}><path d="M4 6h16M4 11h16M4 16h10" /></Icon>;
+export const IconKindLink = () => <Icon size={20}><path d="M10 14a4.5 4.5 0 0 0 6.4 0l3-3a4.5 4.5 0 0 0-6.4-6.4l-1 1" /><path d="M14 10a4.5 4.5 0 0 0-6.4 0l-3 3a4.5 4.5 0 0 0 6.4 6.4l1-1" /></Icon>;
+export const IconKindImages = () => <Icon size={20}><rect x="3" y="4" width="18" height="16" rx="3" /><circle cx="9" cy="10" r="1.8" /><path d="m21 16-5-5-8 9" /></Icon>;
+export const IconKindVideo = () => <Icon size={20}><rect x="3" y="6" width="13" height="12" rx="3" /><path d="m16 10.5 5-3v9l-5-3" /></Icon>;
+export const IconKindReel = () => <Icon size={20}><rect x="7" y="2.5" width="10" height="19" rx="3" /><path d="m11 9.5 3.2 2.5L11 14.5v-5Z" /></Icon>;
+export const IconMenu = () => <Icon size={22}><path d="M4 7h16M4 12h16M4 17h16" /></Icon>;
+export const IconClose = () => <Icon size={20}><path d="M6 6l12 12M18 6 6 18" /></Icon>;
+export const IconChart = () => <Icon><path d="M4 20V10M10 20V4M16 20v-8M22 20H2" /></Icon>;

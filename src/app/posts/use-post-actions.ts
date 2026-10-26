@@ -3,14 +3,15 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useConfirm } from "@/app/confirm-dialog";
+import { useToast } from "@/app/toast";
 import { callApi, fieldErrorsOf, userMessage } from "@/lib/client-api";
 import { messageFor } from "@/lib/errors";
 import { checkSchedule } from "@/lib/field-errors";
 
-export type PostAction = "publish" | "schedule" | "cancel";
+export type PostAction = "publish" | "schedule" | "cancel" | "delete";
 
 /**
- * Status transitions shared by the list rows and the detail page: publish now / retry, schedule, cancel.
+ * Actions shared by the list rows and the detail page: publish now / retry, schedule, cancel, and removing the record.
  * Returns true when the request succeeded, so callers can close menus or clear inputs.
  */
 export function usePostActions({ id, lastErrorCode }: { id: string; lastErrorCode: string | null }) {
@@ -20,6 +21,7 @@ export function usePostActions({ id, lastErrorCode }: { id: string; lastErrorCod
   /** What is wrong with the chosen schedule time (shown under the time box). */
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const confirm = useConfirm();
+  const toast = useToast();
   // A post whose outcome is unknown may already be on Facebook: re-queuing needs an explicit confirmation.
   const ambiguous = lastErrorCode === "AMBIGUOUS";
 
@@ -53,5 +55,29 @@ export function usePostActions({ id, lastErrorCode }: { id: string; lastErrorCod
     } finally { setBusy(null); }
   }
 
-  return { busy, error, scheduleError, clearScheduleError: () => setScheduleError(null), run };
+  /**
+   * Removes the post's record from the app (never anything on Facebook), after asking. Only for a post that is not live:
+   * never published, or already deleted on Facebook. Returns true when it was removed.
+   */
+  async function removeRecord(deletedOnFacebook: boolean): Promise<boolean> {
+    setError("");
+    const ask = ambiguous
+      ? { title: "Xóa bản ghi khi chưa rõ kết quả?", message: "Chưa rõ bài này đã lên Facebook hay chưa. Xóa bản ghi sẽ mất dấu vết của bài.\nHãy kiểm tra Fanpage trước.", confirmLabel: "Vẫn xóa", cancelLabel: "Để tôi kiểm tra", tone: "danger" as const }
+      : deletedOnFacebook
+        ? { title: "Xóa bản ghi khỏi ứng dụng?", message: "Bài đã bị xóa trên Facebook; chỉ bản ghi trong ứng dụng bị xóa.", confirmLabel: "Xóa bản ghi", tone: "danger" as const }
+        : { title: "Xóa bản ghi này?", message: "Bài chưa đăng lên Facebook nên chỉ bản ghi trong ứng dụng bị xóa. Hành động không thể hoàn tác.", confirmLabel: "Xóa bản ghi", tone: "danger" as const };
+    if (!(await confirm(ask))) return false;
+    setBusy("delete");
+    try {
+      await callApi(`/api/posts/${id}${ambiguous ? "?force=true" : ""}`, { method: "DELETE" });
+      toast({ kind: "success", text: "Đã xóa bản ghi." });
+      router.refresh();
+      return true;
+    } catch (e) {
+      setError(userMessage(e));
+      return false;
+    } finally { setBusy(null); }
+  }
+
+  return { busy, error, scheduleError, clearScheduleError: () => setScheduleError(null), run, removeRecord };
 }

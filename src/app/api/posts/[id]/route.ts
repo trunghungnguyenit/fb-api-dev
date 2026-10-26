@@ -5,6 +5,7 @@ import { one, rows, userDb } from "@/lib/db";
 import type { MediaKind } from "@/lib/media/limits";
 import { AMBIGUOUS_CODE, processDuePosts } from "@/lib/publisher";
 import { apiError, failureResponse, invalidFields } from "@/lib/api-error";
+import { publicPost } from "@/lib/post-public";
 import { messageFor } from "@/lib/errors";
 import { isSameOrigin } from "@/lib/csrf";
 import { applyMedia, MediaConflict, resolveMedia, type ResolvedMedia } from "@/lib/media/service";
@@ -126,9 +127,9 @@ export async function PATCH(request: NextRequest, context: { params: Promise<{ i
     try { await processDuePosts({ postId: id }); }
     catch (e) { console.error("publishNow (retry) failed:", e); }
     const { data: fresh } = await db.posts.select(COLUMNS).eq("id", id).maybeSingle();
-    return NextResponse.json({ post: fresh ?? data });
+    return NextResponse.json({ post: publicPost(fresh ?? data) });
   }
-  return NextResponse.json({ post: data });
+  return NextResponse.json({ post: publicPost(data) });
 }
 
 /** Draft / scheduled / failed: nothing is on Facebook, so every field can change (database only). */
@@ -215,7 +216,7 @@ async function editUnpublished(db: Db, existing: Existing, input: PatchInput) {
     .eq("id", existing.id).eq("status", guardStatus).select(COLUMNS).maybeSingle();
   if (error) { await putBack(); return apiError("DB_ERROR", 500, { detail: error }); }
   if (!data) return apiError("POST_LOCKED", 409);
-  return NextResponse.json({ post: data });
+  return NextResponse.json({ post: publicPost(data) });
 }
 
 /** Published: Facebook only lets the text change. Facebook first, then our row. */
@@ -238,7 +239,7 @@ async function editPublished(db: Db, userId: string, existing: Existing, input: 
     const { data, error } = await db.posts.update({ note: input.note || null, updated_at: new Date().toISOString() })
       .eq("id", existing.id).select(COLUMNS).maybeSingle();
     if (error) return apiError("DB_ERROR", 500, { detail: error });
-    return NextResponse.json({ post: data });
+    return NextResponse.json({ post: publicPost(data) });
   }
   const newMessage = input.message as string;
 
@@ -260,7 +261,7 @@ async function editPublished(db: Db, userId: string, existing: Existing, input: 
   await recordEvent(userId, existing.id, "edited", saved ? null : "DB_ERROR");
   if (!saved) return failureResponse("DB_ERROR", "edit applied on Facebook but not saved locally");
   const { data } = await db.posts.select(COLUMNS).eq("id", existing.id).maybeSingle();
-  return NextResponse.json({ post: data });
+  return NextResponse.json({ post: publicPost(data) });
 }
 
 /** The user deleted the post on Facebook by hand: confirm it is really gone, then record it. */
@@ -275,7 +276,7 @@ async function markDeleted(db: Db, userId: string, existing: Existing) {
   }
   await markFacebookGone(userId, existing.id, "marked_deleted");
   const { data } = await db.posts.select(COLUMNS).eq("id", existing.id).maybeSingle();
-  return NextResponse.json({ post: data });
+  return NextResponse.json({ post: publicPost(data) });
 }
 
 /**

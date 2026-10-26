@@ -24,6 +24,9 @@ const schema = z.object({
   META_VIDEO_UPLOAD_MODE: z.enum(["hosted", "binary"]).default("hosted"),
   // Minutes between two reads of one Fanpage's posts (changes made on Facebook reach the app within about this time).
   FEED_SYNC_INTERVAL_MIN: z.coerce.number().int().min(1).max(60).default(5),
+  // Shown on the public privacy and terms pages: who runs the app and where to write (Meta also asks for a contact address).
+  OPERATOR_NAME: z.string().trim().min(1).max(120).optional(),
+  CONTACT_EMAIL: z.string().trim().email().optional(),
   CRON_SECRET: z.string().min(24).refine((v) => !/^replace-/i.test(v), "Placeholder from .env.example, generate a real secret")
 }).superRefine((value, ctx) => {
   try { buildKeyring(value); }
@@ -58,5 +61,7 @@ export const env = schema.parse({
   PUBLISH_HEAVY_CONCURRENCY: process.env.PUBLISH_HEAVY_CONCURRENCY || undefined,
   META_VIDEO_UPLOAD_MODE: process.env.META_VIDEO_UPLOAD_MODE || undefined,
   FEED_SYNC_INTERVAL_MIN: process.env.FEED_SYNC_INTERVAL_MIN || undefined,
+  OPERATOR_NAME: process.env.OPERATOR_NAME || undefined,
+  CONTACT_EMAIL: process.env.CONTACT_EMAIL || undefined,
   CRON_SECRET: process.env.CRON_SECRET
 });

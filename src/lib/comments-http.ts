@@ -6,13 +6,15 @@ import { FacebookActionError } from "@/lib/facebook-posts";
 
 // Shared by the comment routes: find the post a request is about, and turn failures into responses.
 
-export const kindSchema = z.enum(["app", "feed"]);
+export const kindSchema = z.enum(["app", "feed", "visitor"]);
 
-export async function loadTarget(userId: string, kind: unknown, id: string) {
+/** `facebookPostId` is only for kind "visitor" (then `id` is the Fanpage row, not a post). */
+export async function loadTarget(userId: string, kind: unknown, id: string, facebookPostId?: string | null) {
   const parsedKind = kindSchema.safeParse(kind);
   if (!parsedKind.success || !z.string().uuid().safeParse(id).success) return { response: apiError("INVALID_REQUEST", 400) };
-  const resolved = await resolveCommentTarget(userId, parsedKind.data, id);
+  const resolved = await resolveCommentTarget(userId, parsedKind.data, id, facebookPostId ?? undefined);
   if (resolved.ok) return { target: resolved.target };
+  if (resolved.code === "INVALID_REQUEST") return { response: apiError("INVALID_REQUEST", 400) };
   if (resolved.code === "DB_ERROR") return { response: apiError("DB_ERROR", 500) };
   if (resolved.code === "POST_NOT_FOUND") return { response: apiError("POST_NOT_FOUND", 404) };
   return { response: failureResponse(resolved.code) };

@@ -153,41 +153,70 @@ export async function resolveMedia(
   return { ok: true, value: { refs, rows: ordered, postType: derivePostType({ linkUrl: opts.linkUrl, media: ordered }) } };
 }
 
-/**
- * Makes `refs` the media of the post, in that order: attaches uploads, copies cloned files, and detaches
- * files that were on the post but are no longer listed (the cleanup job removes them later).
- * Throws MediaConflict if a file was taken by someone else in the meantime; the caller undoes its own work.
- */
 export class MediaConflict extends Error {}
 
+/**
+ * Makes `refs` the media of the post, in that order: attaches uploads, copies cloned files, and only then detaches
+ * files that were on the post but are no longer listed (the cleanup job removes them later).
+ * All or nothing: if anything fails (MediaConflict when a file was taken by someone else in the meantime, or a
+ * database error) what this call changed is put back, so the post keeps the media it had and no file is orphaned.
+ */
 export async function applyMedia(db: Db, postId: string, resolved: ResolvedMedia) {
   const { refs, rows: files } = resolved;
   const keep = new Set(refs.filter((r) => !r.clone).map((r) => r.id));
 
-  const { data: current, error } = await db.media.select("id").eq("post_id", postId);
+  const { data: current, error } = await db.media.select("id,position").eq("post_id", postId);
   if (error) throw error;
-  const detach = rows<{ id: string }>(current).map((r) => r.id).filter((id) => !keep.has(id));
-  if (detach.length) {
-    const { error: detachError } = await db.media.update({ post_id: null, position: 0 }).in("id", detach);
-    if (detachError) throw detachError;
-  }
+  const before = rows<{ id: string; position: number }>(current).map((r) => ({ id: r.id, position: r.position }));
 
-  for (let i = 0; i < refs.length; i++) {
-    const file = files[i];
-    if (refs[i].clone) {
-      const { error: insertError } = await db.media.insert({
-        post_id: postId, kind: file.kind, storage_path: file.storage_path, file_name: file.file_name, mime: file.mime,
-        size_bytes: file.size_bytes, position: i, state: "uploaded", uploaded_at: new Date().toISOString()
-      });
-      if (insertError) throw insertError;
-    } else {
-      // Only a file that is still free (or already on this post) may be taken.
-      const { data: taken, error: updateError } = await db.media.update({ post_id: postId, position: i })
-        .eq("id", file.id).eq("state", "uploaded").or(`post_id.is.null,post_id.eq.${postId}`).select("id");
-      if (updateError) throw updateError;
-      if (!taken?.length) throw new MediaConflict(file.id);
+  const taken: string[] = []; // free uploads this call attached
+  const copies: string[] = []; // rows this call inserted for cloned files
+  const moved = new Map<string, number>(); // files already on the post whose position this call changed -> old position
+
+  try {
+    for (let i = 0; i < refs.length; i++) {
+      const file = files[i];
+      if (refs[i].clone) {
+        const copyId = crypto.randomUUID();
+        const { error: insertError } = await db.media.insert({
+          id: copyId, post_id: postId, kind: file.kind, storage_path: file.storage_path, file_name: file.file_name, mime: file.mime,
+          size_bytes: file.size_bytes, position: i, state: "uploaded", uploaded_at: new Date().toISOString()
+        });
+        if (insertError) throw insertError;
+        copies.push(copyId);
+        // The cleanup job flips a file to `purged` before deleting it: if that happened meanwhile, the copy would point at nothing.
+        const { data: source, error: sourceError } = await db.media.select("id").eq("id", file.id).eq("state", "uploaded");
+        if (sourceError) throw sourceError;
+        if (!source?.length) throw new MediaConflict(file.id);
+      } else {
+        // Only a file that is still free (or already on this post) may be taken.
+        const { data: updated, error: updateError } = await db.media.update({ post_id: postId, position: i })
+          .eq("id", file.id).eq("state", "uploaded").or(`post_id.is.null,post_id.eq.${postId}`).select("id");
+        if (updateError) throw updateError;
+        if (!updated?.length) throw new MediaConflict(file.id);
+        const previous = before.find((b) => b.id === file.id);
+        if (previous) moved.set(file.id, previous.position); else taken.push(file.id);
+      }
     }
+    const detach = before.map((b) => b.id).filter((id) => !keep.has(id));
+    if (detach.length) {
+      const { error: detachError } = await db.media.update({ post_id: null, position: 0 }).in("id", detach);
+      if (detachError) throw detachError;
+    }
+  } catch (e) {
+    await undoApply(db, { taken, copies, moved });
+    throw e;
   }
+}
+
+/** Best effort: puts back what a failed applyMedia changed. Whatever is missed is left to the cleanup job. */
+async function undoApply(db: Db, done: { taken: string[]; copies: string[]; moved: Map<string, number> }) {
+  const log = (what: string, error: unknown) => { if (error) console.error(`applyMedia: undoing (${what}) failed:`, error); };
+  try {
+    if (done.copies.length) log("copies", (await db.media.delete().in("id", done.copies)).error);
+    if (done.taken.length) log("attached files", (await db.media.update({ post_id: null, position: 0 }).in("id", done.taken)).error);
+    for (const [id, position] of done.moved) log("positions", (await db.media.update({ position }).eq("id", id)).error);
+  } catch (e) { log("unexpected", e); }
 }
 
 /** The media of the given posts, in display order. */

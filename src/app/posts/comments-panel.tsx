@@ -4,14 +4,16 @@ import { useState } from "react";
 import { useConfirm } from "@/app/confirm-dialog";
 import { FieldError, focusFirstInvalid, invalidProps } from "@/app/form-field";
 import { ApiFailure, callApi, fieldErrorsOf, userMessage } from "@/lib/client-api";
-import { checkReply, REPLY_MAX } from "@/lib/field-errors";
+import { checkCommentEdit, checkReply, REPLY_MAX } from "@/lib/field-errors";
 import { formatDateTime } from "@/lib/labels";
 import type { CommentView } from "@/lib/meta/comments";
+import { Toast } from "@/app/toast";
 
 // Comments of a published post, read from Facebook when asked for and shown on the spot: nothing is kept.
-// The Fanpage can reply, hide / show and delete comments here. Everything is also checked by the server.
+// The Fanpage can reply, like, hide / show and delete comments here, and edit the ones it wrote itself. Everything is also checked by the server.
 
-type Kind = "app" | "feed";
+// "visitor": a post a visitor wrote on the Fanpage wall. Then `postId` is the Fanpage row and `facebookPostId` the post.
+type Kind = "app" | "feed" | "visitor";
 type Page = { comments: CommentView[]; next: string | null; total: number | null; access: { read: boolean; manage: boolean } };
 type Problem = { message: string; reconnect: boolean };
 type Replies = { open: boolean; loading: boolean; items: CommentView[]; next: string | null };
@@ -22,7 +24,7 @@ function problemOf(e: unknown): Problem {
   return { message: userMessage(e), reconnect: e instanceof ApiFailure && e.code !== null && NEEDS_RECONNECT.has(e.code) };
 }
 
-export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: string }) {
+export default function CommentsPanel({ kind, postId, facebookPostId }: { kind: Kind; postId: string; facebookPostId?: string }) {
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [comments, setComments] = useState<CommentView[]>([]);
@@ -36,10 +38,15 @@ export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: st
   const [replies, setReplies] = useState<Record<string, Replies>>({});
   const [replyingTo, setReplyingTo] = useState<string | null>(null); // comment id, or "post"
   const [draft, setDraft] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null); // comment being edited
+  const [editDraft, setEditDraft] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // what is being sent, to disable repeated clicks
 
-  const base = `/api/posts/${postId}/comments?kind=${kind}`;
-  const actionQuery = `kind=${kind}&postId=${postId}`;
+  const scope = facebookPostId ? { facebookPostId } : {};
+  const fbQuery = facebookPostId ? `&fbPost=${encodeURIComponent(facebookPostId)}` : "";
+  const base = `/api/posts/${postId}/comments?kind=${kind}${fbQuery}`;
+  const actionQuery = `kind=${kind}&postId=${postId}${fbQuery}`;
 
   async function load(after?: string) {
     setLoading(true); setProblem(null);
@@ -85,7 +92,7 @@ export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: st
     setReplyError(null);
     setBusy(`reply:${replyTo ?? "post"}`); setProblem(null); setStatus("");
     try {
-      await callApi(`/api/posts/${postId}/comments`, { method: "POST", body: { kind, message: draft, ...(replyTo ? { replyTo } : {}) } });
+      await callApi(`/api/posts/${postId}/comments`, { method: "POST", body: { kind, ...scope, message: draft, ...(replyTo ? { replyTo } : {}) } });
       setDraft(""); setReplyingTo(null); setStatus("Đã gửi.");
       if (replyTo) {
         patchLocal(replyTo, { replyCount: (findComment(replyTo)?.replyCount ?? 0) + 1 });
@@ -104,13 +111,64 @@ export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: st
   async function toggleHidden(c: CommentView) {
     setBusy(`hide:${c.id}`); setProblem(null); setStatus("");
     try {
-      await callApi(`/api/comments/${c.id}`, { method: "PATCH", body: { kind, postId, hidden: !c.isHidden } });
+      await callApi(`/api/comments/${c.id}`, { method: "PATCH", body: { kind, postId, ...scope, hidden: !c.isHidden } });
       patchLocal(c.id, { isHidden: !c.isHidden });
       setStatus(c.isHidden ? "Đã hiện lại bình luận." : "Đã ẩn bình luận.");
     } catch (e) {
       if (e instanceof ApiFailure && e.code === "COMMENT_GONE") dropLocal(c.id);
       setProblem(problemOf(e));
     } finally { setBusy(null); }
+  }
+
+  /** Likes the comment as the Fanpage, or takes that like back. */
+  async function toggleLiked(c: CommentView) {
+    const liked = c.likedByPage !== true;
+    setBusy(`like:${c.id}`); setProblem(null); setStatus("");
+    try {
+      await callApi(`/api/comments/${c.id}`, { method: "PATCH", body: { kind, postId, ...scope, liked } });
+      // When Facebook did not say whether it was liked, the count may already include this like: leave it alone.
+      patchLocal(c.id, c.likedByPage === null ? { likedByPage: liked } : { likedByPage: liked, likeCount: Math.max(0, (c.likeCount ?? 0) + (liked ? 1 : -1)) });
+    } catch (e) {
+      if (e instanceof ApiFailure && e.code === "COMMENT_GONE") dropLocal(c.id);
+      setProblem(problemOf(e));
+    } finally { setBusy(null); }
+  }
+
+  function startEdit(c: CommentView) {
+    setReplyingTo(null); setDraft(""); setEditingId(c.id); setEditDraft(c.message); setEditError(null);
+  }
+
+  async function saveEdit(c: CommentView) {
+    const wrong = checkCommentEdit(editDraft);
+    if (wrong) { setEditError(wrong); focusFirstInvalid(); return; }
+    if (editDraft.trim() === c.message.trim()) { setEditingId(null); return; }
+    setEditError(null);
+    setBusy(`edit:${c.id}`); setProblem(null); setStatus("");
+    try {
+      await callApi(`/api/comments/${c.id}`, { method: "PATCH", body: { kind, postId, ...scope, message: editDraft } });
+      patchLocal(c.id, { message: editDraft.trim() });
+      setEditingId(null); setStatus("Đã sửa bình luận.");
+    } catch (e) {
+      const fields = fieldErrorsOf(e);
+      if (fields?.message) { setEditError(fields.message); focusFirstInvalid(); return; }
+      if (e instanceof ApiFailure && e.code === "COMMENT_GONE") { dropLocal(c.id); setEditingId(null); }
+      setProblem(problemOf(e));
+    } finally { setBusy(null); }
+  }
+
+  function editBox(c: CommentView) {
+    const key = `edit-${c.id}`;
+    return <form className="comment-reply" noValidate onSubmit={(e) => { e.preventDefault(); void saveEdit(c); }}>
+      <label className="visually-hidden" htmlFor={key}>Nội dung bình luận</label>
+      <textarea id={key} value={editDraft} onChange={(e) => { setEditDraft(e.target.value); setEditError(null); }} rows={3}
+        disabled={busy === `edit:${c.id}`} {...invalidProps(key, editError, `${key}-count`)} />
+      <div id={`${key}-count`} className={`subtle${editDraft.length > REPLY_MAX ? " over" : ""}`}>{editDraft.length.toLocaleString("vi-VN")} / {REPLY_MAX.toLocaleString("vi-VN")} ký tự</div>
+      <FieldError id={key} message={editError} />
+      <div className="actions">
+        <button className="btn primary" type="submit" disabled={busy !== null}>{busy === `edit:${c.id}` ? "Đang lưu…" : "Lưu"}</button>
+        <button className="btn" type="button" onClick={() => { setEditingId(null); setEditError(null); }} disabled={busy !== null}>Hủy</button>
+      </div>
+    </form>;
   }
 
   async function remove(c: CommentView) {
@@ -147,15 +205,19 @@ export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: st
       <div className="comment-head">
         <strong>{c.author ?? "Người dùng Facebook"}</strong>
         {c.createdTime && <span className="subtle"> · {formatDateTime(c.createdTime)}</span>}
+        {c.byPage && <span className="badge">Fanpage</span>}
         {c.isHidden && <span className="badge">Đã ẩn</span>}
       </div>
-      {c.message ? <p className="comment-body">{c.message}</p> : <p className="subtle">(không có chữ)</p>}
+      {editingId === c.id ? editBox(c) : c.message ? <p className="comment-body">{c.message}</p> : <p className="subtle">(không có chữ)</p>}
       {c.attachment && <p className="subtle">Đính kèm: {c.attachment.type}{c.attachment.url && <> · <a href={c.attachment.url} target="_blank" rel="noopener noreferrer">mở</a></>}</p>}
       <div className="comment-actions">
         <span className="subtle">{c.likeCount ?? 0} thích</span>
+        {canManage && <button type="button" className="link-button" aria-pressed={c.likedByPage === true} disabled={busy !== null} onClick={() => void toggleLiked(c)}>
+          {busy === `like:${c.id}` ? "Đang xử lý…" : c.likedByPage ? "Bỏ thích" : "Thích"}</button>}
         {!isReply && (c.replyCount ?? 0) > 0 && <button type="button" className="link-button" onClick={() => (r?.open ? setReplies((x) => ({ ...x, [c.id]: { ...r, open: false } })) : void loadReplies(c.id))}>
           {r?.open ? "Ẩn trả lời" : `Xem ${c.replyCount} trả lời`}</button>}
-        {canManage && c.canReply && <button type="button" className="link-button" disabled={busy !== null} onClick={() => { setReplyingTo(c.id); setDraft(""); setReplyError(null); }}>Trả lời</button>}
+        {canManage && c.byPage && editingId !== c.id && <button type="button" className="link-button" disabled={busy !== null} onClick={() => startEdit(c)}>Sửa</button>}
+        {canManage && c.canReply && <button type="button" className="link-button" disabled={busy !== null} onClick={() => { setEditingId(null); setReplyingTo(c.id); setDraft(""); setReplyError(null); }}>Trả lời</button>}
         {canManage && c.canHide && <button type="button" className="link-button" disabled={busy !== null} onClick={() => void toggleHidden(c)}>{busy === `hide:${c.id}` ? "Đang xử lý…" : c.isHidden ? "Hiện lại" : "Ẩn"}</button>}
         {canManage && c.canRemove && <button type="button" className="link-button danger" disabled={busy !== null} onClick={() => void remove(c)}>{busy === `delete:${c.id}` ? "Đang xóa…" : "Xóa"}</button>}
       </div>
@@ -175,13 +237,15 @@ export default function CommentsPanel({ kind, postId }: { kind: Kind; postId: st
         </div>
       : <div className="actions">
           <button type="button" className="btn" onClick={() => void load()} disabled={loading || busy !== null}>{loading ? "Đang tải…" : "Làm mới"}</button>
-          {canManage && <button type="button" className="btn" onClick={() => { setReplyingTo("post"); setDraft(""); setReplyError(null); }} disabled={busy !== null}>Bình luận với tư cách Fanpage</button>}
+          {canManage && <button type="button" className="btn" onClick={() => { setEditingId(null); setReplyingTo("post"); setDraft(""); setReplyError(null); }} disabled={busy !== null}>Bình luận với tư cách Fanpage</button>}
           <span className="subtle">{total !== null ? `${total.toLocaleString("vi-VN")} bình luận` : `${comments.length} bình luận`}</span>
         </div>}
 
-    <div role="status" aria-live="polite">{status && <p className="success">{status}</p>}</div>
-    <div role="alert">{problem && <p className="error">{problem.message}{problem.reconnect && <> <a href="/api/auth/facebook">Kết nối lại Facebook</a></>}</p>}</div>
-    {loaded && !canManage && <p className="notice" role="note">Bạn chỉ có quyền xem bình luận. Để trả lời, ẩn hoặc xóa, hãy <a href="/api/auth/facebook">kết nối lại Facebook</a> và cấp quyền quản lý bình luận.</p>}
+    {status && <Toast kind="success" text={status} />}
+    {/* A problem that needs a decision (reconnect) stays on the page; the others are toasts. */}
+    {problem && !problem.reconnect && <Toast kind="error" text={problem.message} />}
+    <div role="alert">{problem?.reconnect && <p className="error">{problem.message} <a href="/api/auth/facebook">Kết nối lại Facebook</a></p>}</div>
+    {loaded && !canManage && <p className="notice" role="note">Bạn chỉ có quyền xem bình luận. Để trả lời, thích, sửa, ẩn hoặc xóa, hãy <a href="/api/auth/facebook">kết nối lại Facebook</a> và cấp quyền quản lý bình luận.</p>}
 
     {replyBox(null)}
     {loaded && (comments.length === 0

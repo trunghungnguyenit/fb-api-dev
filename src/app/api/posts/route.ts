@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { rows, userDb, withPageNames } from "@/lib/db";
+import { POST_PUBLIC_COLUMNS, publicPost, publicPosts } from "@/lib/post-public";
 import { processDuePosts } from "@/lib/publisher";
 import { apiError, invalidFields } from "@/lib/api-error";
 import { isSameOrigin } from "@/lib/csrf";
@@ -34,7 +35,7 @@ export async function GET() {
     .order("created_at", { ascending: false }).limit(200);
   if (error) return apiError("DB_ERROR", 500, { detail: error });
   try {
-    return NextResponse.json({ posts: await withPageNames(db, rows<{ page_id: string }>(data)) });
+    return NextResponse.json({ posts: publicPosts(await withPageNames(db, rows<{ page_id: string }>(data))) });
   } catch (e) {
     return apiError("DB_ERROR", 500, { detail: e });
   }
@@ -87,7 +88,7 @@ export async function POST(request: NextRequest) {
     // With images the post starts as a plain draft: it must not be queued (and picked up by the scheduler) before
     // its images are attached. It is scheduled right after.
     ...(input.media.length ? { status: "draft", scheduled_at: null } : { status, scheduled_at: scheduledAt })
-  }).select().single();
+  }).select(POST_PUBLIC_COLUMNS).single();
 
   if (error || !data) return apiError("DB_ERROR", 500, { detail: error });
 
@@ -100,7 +101,7 @@ export async function POST(request: NextRequest) {
     }
     if (status !== "draft") {
       const { data: queued, error: queueError } = await db.posts.update({ status, scheduled_at: scheduledAt, updated_at: new Date().toISOString() })
-        .eq("id", data.id).eq("status", "draft").select().single();
+        .eq("id", data.id).eq("status", "draft").select(POST_PUBLIC_COLUMNS).single();
       if (queueError || !queued) return apiError("DB_ERROR", 500, { detail: queueError });
       Object.assign(data, queued);
     }
@@ -110,8 +111,8 @@ export async function POST(request: NextRequest) {
   if (input.publishNow) {
     try { await processDuePosts({ postId: data.id }); }
     catch (e) { console.error("publishNow failed:", e); }
-    const { data: fresh } = await db.posts.select().eq("id", data.id).single();
-    return NextResponse.json({ post: fresh ?? data }, { status: 201 });
+    const { data: fresh } = await db.posts.select(POST_PUBLIC_COLUMNS).eq("id", data.id).single();
+    return NextResponse.json({ post: publicPost(fresh ?? data) }, { status: 201 });
   }
-  return NextResponse.json({ post: data }, { status: 201 });
+  return NextResponse.json({ post: publicPost(data) }, { status: 201 });
 }

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { type ConfirmOptions, useConfirm } from "@/app/confirm-dialog";
 import { callApi, userMessage } from "@/lib/client-api";
+import { Toast } from "@/app/toast";
 
 type Props = { id: string; status: string; lastErrorCode: string | null; deletedOnFacebook: boolean };
 type Busy = "record" | "facebook" | "mark" | null;
@@ -70,6 +71,6 @@ export default function PostDangerActions({ id, status, lastErrorCode, deletedOn
         {busy === "mark" ? "Đang kiểm tra…" : "Đánh dấu đã xóa trên Facebook"}
       </button>
     </div>}
-    {error && <p className="error" role="alert" style={{ marginTop: 8 }}>{error}</p>}
+    {error && <Toast kind="error" text={error} />}
   </div>;
 }

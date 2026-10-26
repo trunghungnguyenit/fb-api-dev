@@ -170,7 +170,12 @@ create table if not exists public.page_feed_posts (
   unique (user_id, page_id, facebook_post_id)
 );
 
--- What the user DID to comments on their Fanpages (reply, hide, unhide, delete): who, which comment on which post and
+-- How many of the comments counted by the last read the user has looked at (set when the post is opened). Comments
+-- above this number are "N mới" in the list and drive the "có N bình luận mới" notification. Null = no baseline yet.
+alter table public.page_feed_posts add column if not exists comments_seen_count integer;
+update public.page_feed_posts set comments_seen_count = comments_count where comments_seen_count is null and comments_count is not null;
+
+-- What the user DID to comments on their Fanpages (reply, hide, unhide, delete, like, unlike, edit): who, which comment on which post and
 -- Page, what, when, and whether Facebook accepted it. Deliberately holds NO comment text and no reply text: other
 -- people's words are shown on demand and never kept.
 create table if not exists public.comment_actions (
@@ -178,18 +183,33 @@ create table if not exists public.comment_actions (
   user_id uuid not null references auth.users(id) on delete cascade,
   page_id uuid not null,
   facebook_page_id text not null,
-  post_kind text not null check (post_kind in ('app', 'feed')),
-  -- posts.id (post_kind = app) or page_feed_posts.id (post_kind = feed); no foreign key because it can be either table.
+  post_kind text not null,
+  -- posts.id (post_kind = app) or page_feed_posts.id (post_kind = feed); null for a visitor post (not stored); no foreign key because it can be either table.
   post_ref uuid,
   facebook_post_id text not null,
   facebook_comment_id text not null,
-  action text not null check (action in ('reply', 'hide', 'unhide', 'delete')),
+  action text not null,
   result text not null check (result in ('success', 'failed')),
   error_code text,
   -- For a reply that went through: the id of the new comment.
   result_comment_id text,
   created_at timestamptz not null default now()
 );
+
+-- The allowed actions grow with the features (like, unlike, edit), so the check is re-created on every run.
+alter table public.comment_actions drop constraint if exists comment_actions_action_check;
+alter table public.comment_actions add constraint comment_actions_action_check check (action in (
+  'reply', 'hide', 'unhide', 'delete', 'like', 'unlike', 'edit'
+));
+
+-- Same for the kinds of post a comment can be on: app = a post made here, feed = a post read from the Fanpage, visitor = a post
+-- a visitor wrote on the Fanpage wall (read live, never stored).
+alter table public.comment_actions drop constraint if exists comment_actions_post_kind_check;
+alter table public.comment_actions add constraint comment_actions_post_kind_check check (post_kind in ('app', 'feed', 'visitor'));
+
+-- How many ratings the Fanpage had at the last feed read (or when the user last opened them): a count that went up means
+-- new ratings (only the number is kept, never the ratings themselves).
+alter table public.facebook_pages add column if not exists ratings_count integer;
 
 -- Images (later also video / Reels) attached to posts. The FILE lives in the private Storage bucket `post-media`
 -- (path = storage_path); this row is the record of it. A row with no post_id is an upload not (or no longer)
@@ -287,7 +307,8 @@ update public.posts set post_type = 'link' where post_type = 'text' and link_url
 -- Same idea for notifications: the allowed types grow with the features, so the check is re-created on every run.
 alter table public.notifications drop constraint if exists notifications_type_check;
 alter table public.notifications add constraint notifications_type_check check (type in (
-  'PUBLISH_FAILED', 'PUBLISH_AMBIGUOUS', 'PAGE_ACCESS_LOST', 'REAUTH_REQUIRED', 'TOKEN_EXPIRING', 'SCOPES_MISSING', 'POST_DELETED_ON_FACEBOOK'
+  'PUBLISH_FAILED', 'PUBLISH_AMBIGUOUS', 'PAGE_ACCESS_LOST', 'REAUTH_REQUIRED', 'TOKEN_EXPIRING', 'SCOPES_MISSING', 'POST_DELETED_ON_FACEBOOK',
+  'NEW_COMMENTS', 'NEW_RATINGS'
 ));
 
 -- When the app last asked Facebook directly whether a published post still exists (posts older than the 7-day feed

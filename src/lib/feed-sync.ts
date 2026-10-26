@@ -2,12 +2,14 @@ import { decryptSecret } from "@/lib/crypto";
 import { one, rows, userDb } from "@/lib/db";
 import { MetaApiError, metaGet } from "@/lib/meta/client";
 import {
-  FEED_FIELDS_BASIC, FEED_FIELDS_FULL, mapFeedPost, nextSyncAfter, planAbsences, SYNC_INTERVAL_MS, windowStart,
+  commentIncreases, FEED_FIELDS_BASIC, FEED_FIELDS_FULL, mapFeedPost, nextSyncAfter, planAbsences, seenNeedsUpdate, SYNC_INTERVAL_MS, windowStart,
   type GraphFeedPost, type KnownFeedRow, type MappedFeedPost
 } from "@/lib/meta/feed-posts";
 import { describeMetaError, isPermissionError } from "@/lib/meta/pages";
 import { isRateLimitCode, LOCAL_RATE_LIMIT_CODE } from "@/lib/meta/usage";
 import { clearFacebookGone, markFacebookGone } from "@/lib/facebook-posts";
+import { recordNewComments } from "@/lib/new-comments";
+import { readRatingCount, recordRatingCount } from "@/lib/new-ratings";
 import { dedupeKeys } from "@/lib/notification-text";
 import { notify } from "@/lib/notifications";
 import { deactivatePage } from "@/lib/page-sync";
@@ -81,7 +83,7 @@ export async function storeFeed(
 
   // What is already stored for this window.
   const { data: knownData, error: knownError } = await db.feed
-    .select("id,facebook_post_id,created_time,absent_checks,missing_since").eq("page_id", page.id).gte("created_time", since.toISOString());
+    .select("id,facebook_post_id,created_time,absent_checks,missing_since,comments_count,comments_seen_count").eq("page_id", page.id).gte("created_time", since.toISOString());
   if (knownError) throw knownError;
   const known = rows<KnownFeedRow>(knownData);
   const knownIds = new Set(known.map((k) => k.facebook_post_id));
@@ -103,15 +105,33 @@ export async function storeFeed(
   });
   const fresh = unique.filter((p) => !knownIds.has(p.facebook_post_id));
   const existing = unique.filter((p) => knownIds.has(p.facebook_post_id));
-  // Two homogeneous batches: first_seen_at is only written for posts seen for the first time.
-  for (const part of chunk(fresh, WRITE_CHUNK)) {
-    const { error } = await db.feed.upsert(part.map((p) => ({ ...row(p), first_seen_at: nowIso })), { onConflict: "user_id,page_id,facebook_post_id" });
+  // Which posts gained comments since the last read: worked out from the stored counts BEFORE they are overwritten.
+  const increases = commentIncreases(known, unique);
+  const knownBy = new Map(known.map((k) => [k.facebook_post_id, k]));
+  const needsSeen = (p: MappedFeedPost) => seenNeedsUpdate(knownBy.get(p.facebook_post_id)!, p.comments_count);
+  // A read without the count (the plain-fields fallback) must not erase the stored one: it is the baseline of the next comparison.
+  const lacksCount = (p: MappedFeedPost) => p.comments_count === null && typeof knownBy.get(p.facebook_post_id)?.comments_count === "number";
+  const withoutCount = (p: MappedFeedPost) => Object.fromEntries(Object.entries(row(p)).filter(([key]) => key !== "comments_count"));
+  // Homogeneous batches (a missing column would be written as null): first_seen_at is only written for posts seen for the
+  // first time, the "seen" mark only when it has to be set (a first mark, or the count fell below it), and the count only
+  // when this read has one.
+  const batches: Record<string, unknown>[][] = [
+    ...chunk(fresh, WRITE_CHUNK).map((part) => part.map((p) => ({ ...row(p), first_seen_at: nowIso, comments_seen_count: p.comments_count }))),
+    ...chunk(existing.filter(needsSeen), WRITE_CHUNK).map((part) => part.map((p) => ({ ...row(p), comments_seen_count: p.comments_count }))),
+    ...chunk(existing.filter(lacksCount), WRITE_CHUNK).map((part) => part.map(withoutCount)),
+    ...chunk(existing.filter((p) => !needsSeen(p) && !lacksCount(p)), WRITE_CHUNK).map((part) => part.map(row))
+  ];
+  for (const batch of batches) {
+    const { error } = await db.feed.upsert(batch, { onConflict: "user_id,page_id,facebook_post_id" });
     if (error) throw error;
   }
-  for (const part of chunk(existing, WRITE_CHUNK)) {
-    const { error } = await db.feed.upsert(part.map(row), { onConflict: "user_id,page_id,facebook_post_id" });
-    if (error) throw error;
-  }
+  // After the new counts are stored, so a retried read can never announce the same comments twice. The price is that a
+  // failure half-way through the batches above loses the announcements of the batches already stored (the retry sees no rise).
+  const readById = new Map(unique.map((p) => [p.facebook_post_id, p]));
+  await recordNewComments(page.user_id, page.id, increases.map((inc) => {
+    const post = readById.get(inc.facebookPostId);
+    return { ...inc, appPostId: post ? ownPostOf(post) : null };
+  }), now);
 
   let missing = 0;
   let pending = 0;
@@ -171,7 +191,7 @@ export type SyncResult =
   | { status: "failed"; error: string };
 
 /** Syncs one Page and records when it is due next. Never throws: a Page's trouble is recorded on the Page. */
-export async function syncPageFeed(page: FeedPage, now: Date = new Date()): Promise<SyncResult> {
+export async function syncPageFeed(page: FeedPage, now: Date = new Date(), opts: { ratings?: boolean } = {}): Promise<SyncResult> {
   const db = userDb(page.user_id);
   const stamp = async (patch: Record<string, unknown>) => {
     const { error } = await db.pages.update(patch).eq("id", page.id);
@@ -192,6 +212,11 @@ export async function syncPageFeed(page: FeedPage, now: Date = new Date()): Prom
     await stamp({ feed_synced_at: now.toISOString(), feed_next_sync_at: nextSyncAfter(now).toISOString(), feed_sync_error: null });
     // The read itself succeeded; failing to carry it over to the app's posts is retried by the next read.
     await reconcileOwnPosts(page, now).catch((e) => console.error(`feed sync: updating the app's posts of page ${page.id} failed:`, e));
+    // Last, so a slow answer delays nothing above: how many ratings the Page has now, to tell when new ones arrive (best effort, never throws).
+    if (opts.ratings !== false) {
+      const ratings = await readRatingCount(token, page.page_id);
+      if (ratings !== null) await recordRatingCount(page.user_id, page.id, ratings, now);
+    }
     return { status: "synced", degraded, complete, ...stored };
   } catch (e) {
     if (e instanceof MetaApiError && (isRateLimitCode(e.code) || e.code === LOCAL_RATE_LIMIT_CODE)) {
@@ -269,7 +294,7 @@ export async function syncPageNow(userId: string, pageRowId: string, now: Date =
   if (first.status !== "synced" || !first.complete || first.pending === 0) return first;
   const delay = opts.confirmDelayMs ?? CONFIRM_DELAY_MS;
   if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
-  const second = await syncPageFeed(page, new Date(now.getTime() + delay));
+  const second = await syncPageFeed(page, new Date(now.getTime() + delay), { ratings: false }); // the ratings were just counted
   return second.status === "synced" ? { ...second, created: first.created + second.created } : first;
 }
 

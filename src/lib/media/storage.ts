@@ -84,9 +84,9 @@ export async function readHead(path: string, bytes = 16): Promise<Uint8Array> {
 }
 
 /** The whole file (used only to send a video's bytes to Facebook from this server; files are capped by configuration). */
-export async function downloadObject(path: string): Promise<Uint8Array> {
+export async function downloadObject(path: string, timeoutMs = 120_000): Promise<Uint8Array> {
   const url = await signedUrl(path, 300);
-  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(120_000) });
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) {
     const e: StorageProblem = new Error(`Storage download failed with HTTP ${response.status}`);
     e.status = response.status;

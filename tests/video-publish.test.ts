@@ -33,12 +33,15 @@ vi.mock("@/lib/meta/client", async (original) => ({
 import { publishPost, processDuePosts } from "@/lib/publisher";
 import { resolveProcessingPosts, REELS_PER_DAY } from "@/lib/video-publish";
 import { MetaApiError, MetaRateLimitedError } from "@/lib/meta/client";
+import { MIN_SEND_MS, SAFETY_MS } from "@/lib/publish-state";
 
 const MB = 1024 * 1024;
 const MP4 = Uint8Array.from([0, 0, 0, 0x20, ...Buffer.from("ftypisom"), 0, 0, 0, 0]);
 const VIDEO_ID = "vid-123";
 const NOW = new Date("2026-10-21T12:00:00Z");
 const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
+// The Reels-per-day check reads the real clock, so its rows must be dated against the real clock too (NOW is fixed).
+const realAgo = (ms: number) => new Date(Date.now() - ms).toISOString();
 
 const due = (type: "video" | "reel", over: Record<string, unknown> = {}) => ({
   id: "post1", user_id: "u1", page_id: "pageRow1", message: "Giới thiệu", link_url: null as string | null,
@@ -109,6 +112,18 @@ describe("publishing a plain video", () => {
     expect(metaPost).not.toHaveBeenCalled();
   });
 
+  it("in binary mode a failed download proves nothing was sent: the video is not called 'unknown'", async () => {
+    seed("video", { status: "publishing" });
+    downloadObject.mockRejectedValue(new Error("storage down"));
+    const markSent = vi.fn();
+    const { runVideoPublish } = await import("@/lib/video-publish");
+    await expect(runVideoPublish({
+      post: due("video") as never, pageFbId: "fb-page-1", token: "tok", markSent, mode: "binary"
+    })).rejects.toThrow("storage down");
+    expect(markSent).not.toHaveBeenCalled(); // so the publisher reports a clean failure, not AMBIGUOUS
+    expect(metaPostVideoFile).not.toHaveBeenCalled();
+  });
+
   it("reports Facebook's 'cannot fetch the file' as such, and a failure after the poll as a failed video", async () => {
     seed("video");
     metaPost.mockRejectedValue(new MetaApiError("cannot fetch", "389", 400));
@@ -166,7 +181,7 @@ describe("publishing a Reel", () => {
     expect(metaUploadFromUrl).toHaveBeenCalledWith("https://rupload.facebook.com/video-upload/v26.0/vid-123", "token-of-enc",
       "https://signed.test/u1/m1/clip.mp4", expect.any(Number));
     expect(metaPost).toHaveBeenLastCalledWith("fb-page-1/video_reels", "token-of-enc",
-      { upload_phase: "finish", video_id: VIDEO_ID, video_state: "PUBLISHED", description: "Giới thiệu" });
+      { upload_phase: "finish", video_id: VIDEO_ID, video_state: "PUBLISHED", description: "Giới thiệu" }, expect.any(Number));
     expect(postRow()).toMatchObject({ status: "published", facebook_post_id: VIDEO_ID, publish_phase: null });
   });
 
@@ -237,7 +252,7 @@ describe("publishing a Reel", () => {
   it("waits when the Page already published 30 Reels in 24 hours, without starting a session", async () => {
     seed("reel");
     for (let i = 0; i < REELS_PER_DAY; i++) {
-      fake.tables.posts.push({ id: `old${i}`, user_id: "u1", page_id: "pageRow1", post_type: "reel", status: "published", published_at: ago(2 * 3_600_000) });
+      fake.tables.posts.push({ id: `old${i}`, user_id: "u1", page_id: "pageRow1", post_type: "reel", status: "published", published_at: realAgo(2 * 3_600_000) });
     }
     // 30 published + this one (publishing) = 31 > 30
     metaPost.mockResolvedValue({ video_id: VIDEO_ID });
@@ -251,7 +266,7 @@ describe("publishing a Reel", () => {
 
   it("is within the limit with fewer than 30, and older Reels do not count", async () => {
     seed("reel");
-    for (let i = 0; i < 40; i++) fake.tables.posts.push({ id: `old${i}`, user_id: "u1", page_id: "pageRow1", post_type: "reel", status: "published", published_at: ago(30 * 3_600_000) });
+    for (let i = 0; i < 40; i++) fake.tables.posts.push({ id: `old${i}`, user_id: "u1", page_id: "pageRow1", post_type: "reel", status: "published", published_at: realAgo(30 * 3_600_000) });
     metaPost.mockImplementation(async (_p: string, _t: string, params: Record<string, string>) => (params.upload_phase === "start" ? { video_id: VIDEO_ID } : { success: true }));
     metaGet.mockResolvedValue(ready);
     expect(await publishPost(due("reel"))).toEqual({ result: "published" });
@@ -270,7 +285,94 @@ describe("publishing a Reel", () => {
   });
 });
 
+describe("the function time limit (deadline)", () => {
+  // Written against the exported constants, so they hold whatever the limits are set to.
+  const GATE = MIN_SEND_MS + 5_000; // below this much time left a post is not even claimed (publisher.ts)
+  const NEED = Math.max(30_000, MIN_SEND_MS) + SAFETY_MS; // what a video needs before it is handed to Facebook
+  const left = (ms: number) => Date.now() + ms;
+
+  it("does not even claim a post when too little time is left", async () => {
+    seed("video");
+    expect(await publishPost(due("video"), { deadline: left(GATE - 10_000) })).toEqual({ result: "requeued" });
+    expect(postRow()).toMatchObject({ status: "scheduled", attempt_count: 0, sent_at: null });
+    expect(metaPost).not.toHaveBeenCalled();
+  });
+
+  it("puts a video back in the queue, unsent, when the time left cannot cover the upload", async () => {
+    seed("video");
+    expect(await publishPost(due("video"), { deadline: left(NEED - 2_000) })).toEqual({ result: "requeued" });
+    expect(metaPost).not.toHaveBeenCalled();
+    expect(postRow()).toMatchObject({ status: "scheduled", attempt_count: 1, sent_at: null, locked_at: null }); // claimed, then given back
+    expect(notify).not.toHaveBeenCalled(); // nothing failed: the next run does it
+  });
+
+  it("cuts the upload timeout to the time left instead of the full 120 s", async () => {
+    seed("video");
+    metaPost.mockResolvedValue({ id: VIDEO_ID });
+    metaGet.mockResolvedValue(ready);
+    const spare = 10_000;
+    await publishPost(due("video"), { deadline: left(NEED + spare) });
+    const timeout = metaPost.mock.calls[0][3] as number;
+    expect(timeout).toBeLessThanOrEqual(NEED + spare - SAFETY_MS);
+    expect(timeout).toBeGreaterThan(NEED + spare - SAFETY_MS - 2_000);
+    expect(timeout).toBeLessThan(120_000);
+  });
+
+  it("without a deadline the full upload timeout is kept", async () => {
+    seed("video");
+    metaPost.mockResolvedValue({ id: VIDEO_ID });
+    metaGet.mockResolvedValue(ready);
+    await publishPost(due("video"));
+    expect(metaPost.mock.calls[0][3]).toBe(120_000);
+  });
+
+  it("skips the inline look at the status when the upload used up the time (the follow-up job does it)", async () => {
+    seed("video", { status: "publishing" });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const total = NEED + 5_000;
+      const deadline = Date.now() + total;
+      // The upload takes so long that only 10 s remain afterwards: not enough for a pause plus a look.
+      metaPost.mockImplementation(async () => { vi.setSystemTime(Date.now() + total - 10_000); return { id: VIDEO_ID }; });
+      const { runVideoPublish } = await import("@/lib/video-publish");
+      const result = await runVideoPublish({
+        post: due("video") as never, pageFbId: "fb-page-1", token: "tok", markSent: async () => {}, deadline
+      });
+      expect(result).toEqual({ result: "processing" });
+      expect(metaGet).not.toHaveBeenCalled();
+      expect(postRow()).toMatchObject({ publish_phase: "processing", facebook_video_id: VIDEO_ID }); // remembered for the follow-up
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a Reel with no time left to upload keeps its session and resumes next run", async () => {
+    seed("reel");
+    const startNeeds = 30_000 + SAFETY_MS;
+    const uploadNeeds = MIN_SEND_MS + SAFETY_MS;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const total = Math.max(startNeeds, uploadNeeds) + 1_000; // enough to start the session...
+      const deadline = Date.now() + total;
+      // ...but the session call takes long enough that the upload no longer fits.
+      metaPost.mockImplementation(async () => { vi.setSystemTime(Date.now() + total - uploadNeeds + 1_000); return { video_id: VIDEO_ID }; });
+      expect(await publishPost(due("reel"), { deadline })).toEqual({ result: "requeued" });
+    } finally { vi.useRealTimers(); }
+    expect(metaUploadFromUrl).not.toHaveBeenCalled();
+    expect(postRow()).toMatchObject({ status: "scheduled", publish_phase: "uploading", facebook_video_id: VIDEO_ID, sent_at: null });
+  });
+});
+
 describe("the follow-up job (resolveProcessingPosts)", () => {
+  it("stops looking at posts once its deadline has passed", async () => {
+    fake.reset();
+    fake.tables.posts.push({
+      id: "post1", user_id: "u1", page_id: "pageRow1", post_type: "video", status: "publishing", publish_phase: "processing",
+      facebook_video_id: VIDEO_ID, sent_at: ago(60_000), locked_at: null, processing_since: ago(60_000), phase_checked_at: null, attempt_count: 1
+    });
+    const stats = await resolveProcessingPosts({ now: NOW, deadline: Date.now() - 1 });
+    expect(stats.checked).toBe(0);
+    expect(metaGet).not.toHaveBeenCalled();
+  });
+
   const seedProcessing = (over: Record<string, unknown> = {}) => seed("video", {
     status: "publishing", publish_phase: "processing", facebook_video_id: VIDEO_ID, sent_at: ago(60_000), locked_at: null,
     processing_since: ago(60_000), phase_checked_at: null, attempt_count: 1, ...over
@@ -377,7 +479,6 @@ describe("the reaper (orphaned `publishing` posts) and videos", () => {
     scheduled_at: "2099-01-01T00:00:00Z", locked_at: new Date(Date.now() - 11 * 60_000).toISOString(), next_attempt_at: null, last_error_code: null, ...over
   });
   const byId = (id: string) => fake.tables.posts.find((p) => p.id === id)!;
-  const realAgo = (ms: number) => new Date(Date.now() - ms).toISOString(); // this job reads the real clock
 
   it("never calls a video in a phase 'unknown': Facebook can answer for it. Plain unknown posts still are.", async () => {
     fake.reset();

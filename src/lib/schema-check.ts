@@ -6,11 +6,11 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 const REQUIRED: { table: string; columns: string }[] = [
   { table: "posts", columns: "sent_at,edited_at,facebook_deleted_at,reposted_from,import_batch_id,note,next_attempt_at,post_type,publish_phase,facebook_video_id,processing_since,phase_checked_at,facebook_checked_at" },
   { table: "import_batches", columns: "id,undone_at" },
-  { table: "facebook_pages", columns: "removed_at,feed_synced_at,feed_next_sync_at,feed_sync_error" },
+  { table: "facebook_pages", columns: "removed_at,feed_synced_at,feed_next_sync_at,feed_sync_error,ratings_count" },
   { table: "facebook_connections", columns: "last_checked_at,token_checked_at,token_is_valid,data_access_expires_at" },
   { table: "post_events", columns: "id,type" },
   { table: "notifications", columns: "id,type,dedupe_key,read_at" },
-  { table: "page_feed_posts", columns: "id,page_id,facebook_post_id,created_time,absent_checks,missing_since,post_id" },
+  { table: "page_feed_posts", columns: "id,page_id,facebook_post_id,created_time,absent_checks,missing_since,post_id,comments_seen_count" },
   { table: "comment_actions", columns: "id,page_id,post_kind,facebook_comment_id,action,result" },
   { table: "post_media", columns: "id,post_id,kind,storage_path,state,size_bytes,position,facebook_media_id" }
 ];

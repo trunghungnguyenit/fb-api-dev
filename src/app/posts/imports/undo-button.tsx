@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useConfirm } from "@/app/confirm-dialog";
 import { callApi, userMessage } from "@/lib/client-api";
+import { Toast } from "@/app/toast";
 
 // Removes the not-yet-published posts of one import. Published or in-flight posts are kept by the server.
 export default function UndoImportButton({ batchId, undoable }: { batchId: string; undoable: number }) {
@@ -23,6 +24,6 @@ export default function UndoImportButton({ batchId, undoable }: { batchId: strin
 
   return <div>
     <button type="button" className="btn small danger" disabled={busy} onClick={() => void undo()}>{busy ? "Đang hoàn tác…" : `Hoàn tác (${undoable})`}</button>
-    {error && <p className="row-error" role="alert">{error}</p>}
+    {error && <Toast kind="error" text={error} />}
   </div>;
 }

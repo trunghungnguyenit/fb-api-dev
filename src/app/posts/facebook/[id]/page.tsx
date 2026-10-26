@@ -5,7 +5,10 @@ import { requireUser } from "@/lib/auth";
 import { one, userDb } from "@/lib/db";
 import { AppFailure } from "@/lib/errors";
 import { feedKindLabel, formatDateTime } from "@/lib/labels";
+import { markCommentsSeen } from "@/lib/new-comments";
 import CommentsPanel from "../../comments-panel";
+import PostInsights from "../../post-insights";
+import PostReactions from "../../post-reactions";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +36,8 @@ export default async function FacebookPostPage({ params }: { params: Promise<{ i
   if (!post) notFound();
   // A post the app published itself is managed on its own page.
   if (post.post_id) redirect(`/posts/${post.post_id}`);
+  // Opening the post counts as having seen its comments: clears the "N mới" mark and the notification.
+  await markCommentsSeen(user.id, { feedId: post.id });
 
   const { data: pageData, error: pageError } = await db.pages.select("page_name,removed_at").eq("id", post.page_id).maybeSingle();
   if (pageError) throw new AppFailure("DB_ERROR", pageError);
@@ -61,6 +66,16 @@ export default async function FacebookPostPage({ params }: { params: Promise<{ i
         <div><dt>Cập nhật lần cuối</dt><dd>{formatDateTime(post.last_seen_at)}</dd></div>
       </dl>
     </section>
+
+    {!post.missing_since && !page?.removed_at && <section className="panel" aria-labelledby="post-reactions">
+      <h2 id="post-reactions">Cảm xúc theo loại</h2>
+      <PostReactions kind="feed" id={post.id} />
+    </section>}
+
+    {!post.missing_since && !page?.removed_at && <section className="panel" aria-labelledby="post-insights">
+      <h2 id="post-insights">Insights của bài</h2>
+      <PostInsights kind="feed" id={post.id} />
+    </section>}
 
     {!post.missing_since && !page?.removed_at && <section className="panel" aria-labelledby="comments">
       <h2 id="comments">Bình luận</h2>

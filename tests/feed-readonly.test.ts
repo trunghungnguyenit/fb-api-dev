@@ -77,7 +77,20 @@ describe("only the sync job writes to the mirror of Facebook posts", () => {
     const writers = sourceFiles(root)
       .filter((file) => /\.feed\s*\.\s*(insert|update|upsert|delete)\b/.test(readFileSync(file, "utf8")))
       .map((file) => relative(process.cwd(), file).split(sep).join("/"));
-    expect(writers).toEqual(["src/lib/feed-sync.ts"]);
+    // The sync writes what Facebook said. new-comments.ts only keeps the user's own bookkeeping (see the next test).
+    expect(writers).toEqual(["src/lib/feed-sync.ts", "src/lib/new-comments.ts"]);
+  });
+
+  it("the new-comments bookkeeping only ever updates the two comment counters of a row, never the post itself", () => {
+    const source = readFileSync(join(process.cwd(), "src/lib/new-comments.ts"), "utf8");
+    expect(source).not.toMatch(/\.feed\s*\.\s*(insert|upsert|delete)\b/);
+    // Every update patch is one of the literals below: no other column can be written without failing this test.
+    const patches = [...source.matchAll(/\.feed\s*\.\s*update\(([^)]*)\)/g)].map((m) => m[1].trim());
+    expect(patches.sort()).toEqual(
+      ["patch", "{ comments_seen_count: row.comments_count }", "{ comments_count: total, comments_seen_count: total }"].sort()
+    );
+    expect(source).toContain("const patch: Record<string, number> = { comments_count: row.comments_count + 1 };");
+    expect(source).toContain("patch.comments_seen_count = row.comments_seen_count + 1;");
   });
 
   it("nothing writes to it through the raw table name either", () => {

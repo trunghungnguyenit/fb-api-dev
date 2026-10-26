@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { Suspense } from "react";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { escapeLike, rows, userDb, withPageNames } from "@/lib/db";
@@ -7,20 +8,26 @@ import { AppFailure } from "@/lib/errors";
 import { formatDateTime, postErrorText, STATUS_FILTERS, statusLabel, truncate } from "@/lib/labels";
 import { repostModes } from "@/lib/repost";
 import FacebookFeedView from "./facebook-feed-view";
+import RatingsView from "./ratings-view";
+import VisitorPostsView from "./visitor-posts-view";
 import PostsTable, { type PostRowView } from "./posts-table";
 import { feedIsStaleForUser } from "@/lib/feed-freshness";
 import FeedAutoRefresh from "./feed-auto-refresh";
 import PostsTabs from "./posts-tabs";
 import PageHeader from "@/app/page-header";
+import { GuestTabSkeleton } from "@/app/skeleton";
 import NewPostButton from "@/app/new-post-button";
+import FilterBar from "./filter-bar";
 import Pagination from "./pagination";
 import { IconBug, IconSliders } from "@/app/icons";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 25;
+/** "Xem thêm" stacks pages in one list: at most 1000 rows, which is also what the database answers in one request. */
+const MORE_MAX_PAGES = 40;
 
-type Search = { status?: string; page?: string; q?: string; p?: string; batch?: string; source?: string; gone?: string };
+type Search = { more?: string; status?: string; page?: string; q?: string; p?: string; batch?: string; source?: string; gone?: string; after?: string };
 type PostRow = {
   id: string;
   page_id: string;
@@ -43,16 +50,22 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
   const sp = await searchParams;
   // Posts read from the Fanpage on Facebook (read-only): a separate list, never mixed into the app's own posts.
   if (sp.source === "facebook") return <FacebookFeedView userId={user.id} search={sp} />;
+  // What visitors left on the Fanpage (their posts, their ratings): read live, one Fanpage at a time, never stored.
+  // They wait on Facebook, so the page is drawn at once with a skeleton (a new key per Fanpage and cursor shows it again).
+  if (sp.source === "visitor") return <Suspense key={`visitor|${sp.page}|${sp.after}`} fallback={<GuestTabSkeleton active="visitor" subtitle="Bài khách viết trên tường Fanpage, đọc từ Facebook" />}><VisitorPostsView userId={user.id} search={sp} /></Suspense>;
+  if (sp.source === "ratings") return <Suspense key={`ratings|${sp.page}|${sp.after}`} fallback={<GuestTabSkeleton active="ratings" subtitle="Đánh giá của khách về Fanpage, đọc từ Facebook" />}><RatingsView userId={user.id} search={sp} /></Suspense>;
 
   // Everything comes from the URL, so validate it: unknown values are ignored, never echoed.
   const status = STATUS_FILTERS.some((s) => s.value === sp.status) ? (sp.status as string) : "";
   const pageFilter = z.string().uuid().safeParse(sp.page).success ? (sp.page as string) : "";
   const q = (typeof sp.q === "string" ? sp.q : "").trim().slice(0, 100);
   const batchFilter = z.string().uuid().safeParse(sp.batch).success ? (sp.batch as string) : "";
-  const requested = Math.max(1, Math.min(Number.parseInt(sp.p ?? "1", 10) || 1, 100_000));
+  const requested = Math.max(1, Math.min(Number.parseInt(sp.p ?? "1", 10) || 1, sp.more === "1" ? MORE_MAX_PAGES : 100_000));
 
   const db = userDb(user.id);
-  const from = (requested - 1) * PAGE_SIZE;
+  // "Xem thêm" (phones) shows every page up to the requested one in one list; the numbered pages show one page.
+  const more = sp.more === "1";
+  const from = more ? 0 : (requested - 1) * PAGE_SIZE;
   let query = db.posts
     .select("id,page_id,message,post_type,publish_phase,status,scheduled_at,published_at,last_error_code,facebook_post_id,facebook_deleted_at,reposted_from,note", { count: "exact" });
   if (status === "deleted") query = query.not("facebook_deleted_at", "is", null);
@@ -62,7 +75,7 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
   if (q) query = query.ilike("message", `%${escapeLike(q)}%`);
 
   const [list, pagesResult] = await Promise.all([
-    query.order("created_at", { ascending: false }).range(from, from + PAGE_SIZE - 1),
+    query.order("created_at", { ascending: false }).range(from, requested * PAGE_SIZE - 1),
     db.pages.select("id,page_name,removed_at").order("page_name")
   ]);
   if (list.error) throw new AppFailure("DB_ERROR", list.error);
@@ -77,13 +90,14 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
   const current = Math.min(requested, totalPages);
   const hasFilter = Boolean(status || pageFilter || q || batchFilter);
 
-  const href = (p: number) => {
+  const href = (p: number, withMore = false) => {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
     if (pageFilter) params.set("page", pageFilter);
     if (q) params.set("q", q);
     if (batchFilter) params.set("batch", batchFilter);
     if (p > 1) params.set("p", String(p));
+    if (withMore && p > 1) params.set("more", "1");
     const qs = params.toString();
     return qs ? `/posts?${qs}` : "/posts";
   };
@@ -130,10 +144,11 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
       {batchFilter && <p className="notice" role="note" style={{ margin: "0 0 14px" }}>
         Đang xem các bài của một lần nhập. <Link href="/posts">Xem tất cả bài viết</Link> · <Link href="/posts/imports">Lịch sử nhập</Link>
       </p>}
+      <FilterBar active={Number(Boolean(status)) + Number(Boolean(pageFilter))}>
       <form method="get" action="/posts" className="filters" role="search">
         {batchFilter && <input type="hidden" name="batch" value={batchFilter} />}
-        <div className="field"><label htmlFor="q">Tìm theo nội dung</label>
-          <input id="q" name="q" type="search" defaultValue={q} maxLength={100} placeholder="Nhập từ khóa…" /></div>
+        <div className="field field-search"><label htmlFor="q">Tìm theo nội dung</label>
+          <input id="q" name="q" type="search" enterKeyHint="search" defaultValue={q} maxLength={100} placeholder="Nhập từ khóa…" /></div>
         <div className="field"><label htmlFor="status">Trạng thái</label>
           <select id="status" name="status" defaultValue={status}>
             <option value="">Tất cả</option>
@@ -149,6 +164,7 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
           {hasFilter && <Link className="btn" href="/posts">Xóa bộ lọc</Link>}
         </div>
       </form>
+      </FilterBar>
 
       <div className="neo-toolbar">
         <p className="subtle" aria-live="polite">{total.toLocaleString("vi-VN")} bài{hasFilter ? " phù hợp" : ""} · Trang {current}/{totalPages} · <Link href="/posts/imports">Lịch sử nhập</Link></p>
@@ -162,7 +178,8 @@ export default async function PostsPage({ searchParams }: { searchParams: Promis
       </div>
       <PostsTable posts={views} />
 
-      <Pagination current={current} totalPages={totalPages} href={href} action="/posts" params={{ ...(status ? { status } : {}), ...keep }} />
+      <Pagination current={current} totalPages={totalPages} href={href} action="/posts" params={{ ...(status ? { status } : {}), ...keep }}
+        more={{ href: href(current + 1, true), remaining: Math.max(0, total - current * PAGE_SIZE), total }} />
     </section>
   </main>;
 }

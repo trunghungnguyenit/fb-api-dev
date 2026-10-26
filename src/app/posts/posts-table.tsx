@@ -8,6 +8,7 @@ import { callApi, userMessage } from "@/lib/client-api";
 import ErrorCell from "./error-cell";
 import StatusPill, { postTone } from "@/app/status-pill";
 import RowActions from "./row-actions";
+import { Toast } from "@/app/toast";
 
 export type PostRowView = {
   id: string;
@@ -35,6 +36,9 @@ export type PostRowView = {
 function shortId(id: string) {
   return id.length > 16 ? `${id.slice(0, 6)}…${id.slice(-6)}` : id;
 }
+
+/** What /api/posts/bulk accepts in one request. */
+const BULK_MAX = 50;
 
 type BulkResult = { done: number; skipped: { id: string; code: string; message: string }[] };
 type BulkAction = "cancel" | "delete" | "repost-draft" | "repost-now";
@@ -67,10 +71,15 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
   // Drop selections for posts that are no longer on this page (after a refresh, filter or bulk action).
   useEffect(() => { setSelected((prev) => new Set([...prev].filter((id) => ids.includes(id)))); }, [ids]);
   const allSelected = ids.length > 0 && selected.size === ids.length;
-  useEffect(() => { if (allRef.current) allRef.current.indeterminate = selected.size > 0 && !allSelected; }, [selected, allSelected]);
+  const allPossible = ids.length > 0 && selected.size === Math.min(ids.length, BULK_MAX);
+  useEffect(() => { if (allRef.current) allRef.current.indeterminate = selected.size > 0 && !allPossible; }, [selected, allPossible]);
 
   const toggle = (id: string) => setSelected((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(ids));
+  const toggleAll = () => {
+    if (allSelected || selected.size >= Math.min(ids.length, BULK_MAX)) { setSelected(new Set()); return; }
+    setSelected(new Set(ids.slice(0, BULK_MAX)));
+    if (ids.length > BULK_MAX) setNotice({ kind: "success", text: `Đã chọn ${BULK_MAX} bài đầu danh sách: mỗi lần thao tác tối đa ${BULK_MAX} bài.` });
+  };
 
   async function bulk(action: BulkAction) {
     if (!(await confirm(confirmOptions(action, selected.size)))) return;
@@ -107,16 +116,11 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
         <button className="btn small" type="button" disabled={disabled} onClick={() => setSelected(new Set())}>Bỏ chọn</button>
       </div>
     </div>}
-    <div role={notice?.kind === "error" ? "alert" : "status"} aria-live="polite">
-      {notice && <div className={notice.kind} style={{ marginBottom: 12 }}>
-        <div>{notice.text}</div>
-        {notice.details?.map((d) => <div key={d} className="subtle">{d}</div>)}
-      </div>}
-    </div>
+    {notice && <Toast kind={notice.kind} text={notice.text} details={notice.details} />}
 
     <div className="table-wrap"><table className="posts-table cards">
       <thead><tr>
-        <th scope="col"><input ref={allRef} type="checkbox" aria-label="Chọn tất cả bài trên trang này" checked={allSelected} onChange={toggleAll} disabled={ids.length === 0} /></th>
+        <th scope="col"><input ref={allRef} type="checkbox" aria-label={ids.length > BULK_MAX ? `Chọn ${BULK_MAX} bài đầu danh sách` : "Chọn tất cả bài trong danh sách"} checked={allPossible} onChange={toggleAll} disabled={ids.length === 0} /></th>
         <th scope="col" className="col-content">Nội dung</th><th scope="col">Fanpage</th><th scope="col">Trạng thái</th>
         <th scope="col">Thời gian</th><th scope="col" className="col-error">Lỗi</th><th scope="col" className="col-actions">Thao tác</th>
       </tr></thead>
@@ -136,7 +140,7 @@ export default function PostsTable({ posts }: { posts: PostRowView[] }) {
           </div></td>
           <td className="col-error" data-label="Lỗi">{post.hasError ? <ErrorCell text={post.errorText} /> : <span className="cell-none">—</span>}</td>
           <td className="col-actions" data-label="Thao tác">
-            <RowActions id={post.id} status={post.status} lastErrorCode={post.lastErrorCode} canRepost={post.canRepost} editable={post.editable} />
+            <RowActions id={post.id} status={post.status} lastErrorCode={post.lastErrorCode} canRepost={post.canRepost} editable={post.editable} deletedOnFacebook={post.deleted} />
           </td>
         </tr>)}
         {!posts.length && <tr><td colSpan={7}>Không có bài viết nào.</td></tr>}

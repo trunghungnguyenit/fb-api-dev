@@ -1,5 +1,6 @@
 import { rows, userDb } from "@/lib/db";
 import { processDuePosts } from "@/lib/publisher";
+import { FUNCTION_LIMIT_MS } from "@/lib/publish-state";
 import { REPOST_WINDOW_MS, repostSchedule, type RepostWhen } from "@/lib/repost";
 
 type Db = ReturnType<typeof userDb>;
@@ -64,7 +65,8 @@ export async function publishInline(ids: string[], budgetMs = 25_000) {
   const started = Date.now();
   for (const id of ids) {
     if (Date.now() - started > budgetMs) break;
-    try { await processDuePosts({ postId: id }); }
+    // Every post shares the request's one function limit, not 60 s each.
+    try { await processDuePosts({ postId: id, deadline: started + FUNCTION_LIMIT_MS - 3_000 }); }
     catch (e) { console.error(`inline publish failed for ${id}:`, e); }
   }
 }

@@ -24,6 +24,7 @@ vi.mock("@/lib/meta/client", async (original) => ({
 
 import { publishPost } from "@/lib/publisher";
 import { MetaApiError } from "@/lib/meta/client";
+import { MIN_SEND_MS, SAFETY_MS } from "@/lib/publish-state";
 import {
   createdPostId, feedRequest, multiPhotoRequest, singlePhotoRequest, unpublishedPhotoRequest
 } from "@/lib/media/publish-media";
@@ -122,6 +123,33 @@ describe("publishing several photos", () => {
     });
     expect([0, 1, 2].map((i) => mediaRow(`m${i}`).facebook_media_id)).toEqual(["fbphoto1", "fbphoto2", "fbphoto3"]);
     expect(postRow()).toMatchObject({ status: "published", facebook_post_id: "feed-post-1" });
+  });
+
+  it("stops uploading when the function's time is nearly up, and the next run continues with the rest", async () => {
+    seed("photos", 3);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      let n = 0;
+      const each = 20_000; // every photo upload takes 20 s
+      const needed = MIN_SEND_MS + SAFETY_MS; // time that must be left before another upload may start
+      metaPost.mockImplementation(async (path: string) => {
+        if (!path.endsWith("/photos")) return { id: "feed-post-1" };
+        vi.setSystemTime(Date.now() + each);
+        return { id: `fbphoto${++n}` };
+      });
+      // Room for two uploads, not for a third.
+      expect(await publishPost(post({ post_type: "photos" }), { deadline: Date.now() + needed + each + 5_000 })).toEqual({ result: "requeued" });
+      expect(metaPost).toHaveBeenCalledTimes(2);
+      expect(postRow()).toMatchObject({ status: "scheduled", sent_at: null, locked_at: null });
+      expect([0, 1, 2].map((i) => mediaRow(`m${i}`).facebook_media_id ?? null)).toEqual(["fbphoto1", "fbphoto2", null]);
+      expect(notify).not.toHaveBeenCalled();
+
+      // Next run: only the missing photo is uploaded, then the one feed post.
+      metaPost.mockClear();
+      expect(await publishPost(post({ post_type: "photos" }), { deadline: Date.now() + needed + 3 * each })).toEqual({ result: "published" });
+      expect(metaPost.mock.calls.map((c) => c[0])).toEqual(["fb-page-1/photos", "fb-page-1/feed"]);
+      expect(postRow()).toMatchObject({ status: "published", facebook_post_id: "feed-post-1" });
+    } finally { vi.useRealTimers(); }
   });
 
   it("does not upload photos again on a retry", async () => {

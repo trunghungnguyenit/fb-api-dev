@@ -3,11 +3,12 @@
 import { messageFor } from "@/lib/errors";
 
 export const NOTIFICATION_TYPES = [
-  "PUBLISH_FAILED", "PUBLISH_AMBIGUOUS", "PAGE_ACCESS_LOST", "REAUTH_REQUIRED", "TOKEN_EXPIRING", "SCOPES_MISSING", "POST_DELETED_ON_FACEBOOK"
+  "PUBLISH_FAILED", "PUBLISH_AMBIGUOUS", "PAGE_ACCESS_LOST", "REAUTH_REQUIRED", "TOKEN_EXPIRING", "SCOPES_MISSING", "POST_DELETED_ON_FACEBOOK", "NEW_COMMENTS", "NEW_RATINGS"
 ] as const;
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];
 
-export type NotificationParams = { connectionName?: string; days?: number; features?: string[] };
+/** NEW_COMMENTS / NEW_RATINGS: how many arrived (adds up while unread); for comments also which stored Facebook post and when it was published. */
+export type NotificationParams = { connectionName?: string; days?: number; features?: string[]; count?: number; feedPostId?: string; postDate?: string };
 
 export type NotificationRow = {
   id?: string;
@@ -33,7 +34,11 @@ export const dedupeKeys = {
   /** Sent when a permission is taken back, so once per day at most; the same set can be reported again after a re-grant. */
   scopesMissing: (connectionId: string, features: string[], day: string) => `scopes-missing:${connectionId}:${[...features].sort().join("+")}:${day}`,
   /** One per deletion: a post that comes back and is deleted again is a new event (a new `since`). */
-  postDeleted: (postId: string, since: string) => `post-deleted:${postId}:${since}`
+  postDeleted: (postId: string, since: string) => `post-deleted:${postId}:${since}`,
+  /** One per post per "round": while the notification is unread new comments are added to it, once read the next ones start a new round (the time of that read). */
+  newComments: (feedPostId: string, round: number) => `new-comments:${feedPostId}:${round}`,
+  /** One per Page per round, like the comments: new ratings add up while the notification is unread. */
+  newRatings: (pageRowId: string, round: number) => `new-ratings:${pageRowId}:${round}`
 };
 
 export type NotificationText = { title: string; detail: string; href: string };
@@ -83,6 +88,24 @@ export function describeNotification(n: NotificationRow, pageName?: string | nul
         detail: "Bài này không còn trên Fanpage (đã bị xóa hoặc ẩn trực tiếp trên Facebook). Ứng dụng giữ lại bản ghi và đánh dấu “Đã xóa trên Facebook”; nếu bài hiện lại, nhãn sẽ tự được gỡ.",
         href: postHref
       };
+    case "NEW_COMMENTS": {
+      const count = Math.max(1, Math.round(n.params?.count ?? 1));
+      const when = n.params?.postDate ? new Date(n.params.postDate) : null;
+      const date = when && !Number.isNaN(when.getTime()) ? when.toLocaleDateString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" }) : null;
+      return {
+        title: `${count.toLocaleString("vi-VN")} bình luận mới${page}`,
+        detail: `${date ? `Bài đăng ngày ${date}. ` : ""}Bấm để xem và trả lời.`,
+        href: n.post_id ? `/posts/${n.post_id}` : n.params?.feedPostId ? `/posts/facebook/${n.params.feedPostId}` : "/posts?source=facebook"
+      };
+    }
+    case "NEW_RATINGS": {
+      const count = Math.max(1, Math.round(n.params?.count ?? 1));
+      return {
+        title: `${count.toLocaleString("vi-VN")} đánh giá mới${page}`,
+        detail: "Bấm để xem đánh giá của khách trên Fanpage.",
+        href: n.page_id ? `/posts?source=ratings&page=${n.page_id}` : "/posts?source=ratings"
+      };
+    }
     default:
       return { title: "Thông báo", detail: "", href: "/" };
   }

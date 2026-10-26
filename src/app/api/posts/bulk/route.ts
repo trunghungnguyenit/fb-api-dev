@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireUser } from "@/lib/auth";
 import { rows, userDb } from "@/lib/db";
+import { publicPosts } from "@/lib/post-public";
 import { apiError, invalidFields } from "@/lib/api-error";
 import { isSameOrigin } from "@/lib/csrf";
 import { AMBIGUOUS_CODE } from "@/lib/publisher";
@@ -83,7 +84,7 @@ export async function POST(request: NextRequest) {
   if (action === "repost") {
     try {
       const result = await repostMany(db, eligible, parsed.data.when ?? "draft", skipped);
-      return respond(result.done, { posts: result.posts });
+      return respond(result.done, { posts: publicPosts(result.posts) });
     } catch (e) {
       return apiError("DB_ERROR", 500, { detail: e });
     }
@@ -157,12 +158,13 @@ async function repostMany(db: ReturnType<typeof userDb>, eligible: Row[], when: 
     postType: derivePostType({ linkUrl: p.link_url, media })
   });
 
-  const createdPlain = plain.length ? await insertClones(db, plain.map((p) => item(p, [])), when) : [];
-  // Posts with images start as drafts: nothing may be queued (and picked up by the scheduler) before its images are
-  // attached. They are scheduled right after.
+  // All or nothing: the posts that can fail (the ones with images) are created first, and as drafts so nothing can be
+  // queued (and picked up by the scheduler) before its images are attached. Only when they are done are the text-only
+  // posts inserted, so a failure never leaves half of the batch behind (and a retry never duplicates the other half).
   const createdImages = withImages.length
     ? await insertClones(db, withImages.map((p) => item(p, imagesOf.get(p.id)!)), "draft")
     : [];
+  const dropImageDrafts = () => db.posts.delete().in("id", createdImages.map((p) => p.id)).eq("status", "draft");
   try {
     for (let i = 0; i < createdImages.length; i++) {
       const files = imagesOf.get(withImages[i].id)!;
@@ -171,7 +173,14 @@ async function repostMany(db: ReturnType<typeof userDb>, eligible: Row[], when: 
       });
     }
   } catch (e) {
-    await db.posts.delete().in("id", createdImages.map((p) => p.id)).eq("status", "draft");
+    await dropImageDrafts();
+    throw e;
+  }
+  let createdPlain: Awaited<ReturnType<typeof insertClones>> = [];
+  try {
+    if (plain.length) createdPlain = await insertClones(db, plain.map((p) => item(p, [])), when);
+  } catch (e) {
+    if (createdImages.length) await dropImageDrafts();
     throw e;
   }
   if (createdImages.length && when !== "draft") {

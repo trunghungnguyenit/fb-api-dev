@@ -71,6 +71,42 @@ export function releasesFiles(post: PostInfo | undefined, now: Date) {
   return false;
 }
 
+/**
+ * Deletes one file whose rows (`ids`) were judged releasable a moment ago. The look-then-delete gap is closed in
+ * three steps, because a re-post may copy the file at any time:
+ *  1. claim: flip the rows to `purged` first (applyMedia refuses to copy from a purged row);
+ *  2. look again: any row that points at the file and is not purged was created after our look (a copy that got in
+ *     before the claim), so the claim is undone and the file stays;
+ *  3. only then remove the file.
+ * A failure after step 1 undoes the claim, so the next run retries (the failure is logged here).
+ */
+async function purgeFile(path: string, ids: string[], now: Date): Promise<"purged" | "kept" | "error"> {
+  const revert = async () => {
+    const { error } = await supabaseAdmin.from("post_media").update({ state: "uploaded", purged_at: null })
+      .in("id", ids).eq("state", "purged");
+    if (error) console.error(`media cleanup: could not undo the claim on ${path}:`, error);
+  };
+  try {
+    const { error: claimError } = await supabaseAdmin.from("post_media")
+      .update({ state: "purged", purged_at: now.toISOString() }).in("id", ids).eq("state", "uploaded");
+    if (claimError) throw claimError;
+    try {
+      const { data: late, error: lateError } = await supabaseAdmin.from("post_media").select("id")
+        .eq("storage_path", path).eq("state", "uploaded").limit(1);
+      if (lateError) throw lateError;
+      if (late?.length) { await revert(); return "kept"; } // somebody copied it meanwhile: not an error
+      await removeObjects([path]);
+      return "purged";
+    } catch (e) {
+      await revert();
+      throw e;
+    }
+  } catch (e) {
+    console.error(`media cleanup: purging ${path} failed:`, e);
+    return "error";
+  }
+}
+
 async function purgeFinishedPosts(now: Date, deadline: number, stats: CleanupStats) {
   const cutoff = new Date(now.getTime() - PUBLISHED_TTL_MS).toISOString();
   // Files only older than the retention window can belong to a post that released them, so younger rows are skipped.
@@ -89,9 +125,9 @@ async function purgeFinishedPosts(now: Date, deadline: number, stats: CleanupSta
     const paths = [...new Set(batch.map((r) => r.storage_path))];
     // Every live row that uses these files, with the post each belongs to.
     const { data: refData, error: refError } = await supabaseAdmin.from("post_media")
-      .select("storage_path,post_id").in("storage_path", paths).eq("state", "uploaded");
+      .select("id,storage_path,post_id").in("storage_path", paths).eq("state", "uploaded");
     if (refError) throw refError;
-    const refs = (refData ?? []) as { storage_path: string; post_id: string | null }[];
+    const refs = (refData ?? []) as { id: string; storage_path: string; post_id: string | null }[];
     const postIds = [...new Set(refs.map((r) => r.post_id).filter((id): id is string => Boolean(id)))];
     const { data: postData, error: postError } = postIds.length
       ? await supabaseAdmin.from("posts").select("id,status,published_at,updated_at").in("id", postIds)
@@ -103,16 +139,9 @@ async function purgeFinishedPosts(now: Date, deadline: number, stats: CleanupSta
       const users = refs.filter((r) => r.storage_path === path);
       // A row with no post is an upload still waiting to be used: the file stays until that is settled.
       if (!users.every((r) => r.post_id && releasesFiles(posts.get(r.post_id), now))) continue;
-      try {
-        await removeObjects([path]);
-        const { error: markError } = await supabaseAdmin.from("post_media")
-          .update({ state: "purged", purged_at: now.toISOString() }).eq("storage_path", path).eq("state", "uploaded");
-        if (markError) throw markError;
-        stats.purgedFiles++;
-      } catch (e) {
-        console.error(`media cleanup: purging ${path} failed:`, e);
-        stats.errors++;
-      }
+      const outcome = await purgeFile(path, users.map((r) => r.id), now);
+      if (outcome === "purged") stats.purgedFiles++;
+      else if (outcome === "error") stats.errors++;
     }
   }
   stats.stoppedEarly = true;

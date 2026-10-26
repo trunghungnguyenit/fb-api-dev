@@ -4,6 +4,8 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useEffect, useRef, useState } from "react";
+import { FieldError } from "@/app/form-field";
+import { IconUpload } from "@/app/icons";
 import { userMessage } from "@/lib/client-api";
 import { discardUpload, uploadMedia } from "@/lib/media/client-upload";
 import { formatMb, type ClientMediaLimits, type MediaKind } from "@/lib/media/limits";
@@ -106,6 +108,16 @@ export function useMediaItems(initial: MediaItem[], limits: ClientMediaLimits) {
     });
   }
 
+  /** The kind of post changed to one that does not use these files: drops them all (uploads nobody attached are deleted). */
+  function clear() {
+    for (const item of latest.current) {
+      if (item.blobUrl) URL.revokeObjectURL(item.previewUrl);
+      if (item.mediaId && !item.kept && !item.clone) void discardUpload(item.mediaId);
+    }
+    setItems([]);
+    setNotice("");
+  }
+
   /** The form was saved: the files now belong to a post, so they must not be deleted when the form is cleared. */
   function reset() {
     latest.current.forEach((i) => { if (i.blobUrl) URL.revokeObjectURL(i.previewUrl); });
@@ -118,7 +130,7 @@ export function useMediaItems(initial: MediaItem[], limits: ClientMediaLimits) {
     .map((i) => (i.clone ? { id: i.mediaId as string, clone: true } : { id: i.mediaId as string }));
 
   return {
-    items, notice, refs, addFiles, remove, move, reset,
+    items, notice, refs, addFiles, remove, move, reset, clear,
     uploading: items.some((i) => i.status === "uploading"),
     hasErrors: items.some((i) => i.status === "error"),
     /** What the post is made of right now: null (nothing), "image", "video" or "reel". */
@@ -130,14 +142,29 @@ export type MediaState = ReturnType<typeof useMediaItems>;
 
 const ACCEPT = { image: IMAGE_MIME_TYPES.join(","), video: VIDEO_MIME_TYPES.join(","), reel: VIDEO_MIME_TYPES.join(",") } as const;
 
-export default function MediaPicker({ state, limits, disabled }: { state: MediaState; limits: ClientMediaLimits; disabled?: boolean }) {
-  const inputs = { image: useRef<HTMLInputElement>(null), video: useRef<HTMLInputElement>(null), reel: useRef<HTMLInputElement>(null) };
-  const { items, kind } = state;
-  const imagesFull = items.filter((i) => i.status !== "error").length >= limits.imagesPerPost;
-  const choose = (k: MediaKind) => (e: React.ChangeEvent<HTMLInputElement>) => { state.addFiles([...(e.target.files ?? [])], k); e.target.value = ""; };
+const TITLE: Record<MediaKind, string> = { image: "Ảnh", video: "Video", reel: "Video Reels" };
+const CHOOSE: Record<MediaKind, string> = { image: "Chọn ảnh", video: "Chọn video", reel: "Chọn video cho Reels" };
+
+/**
+ * The files of a post of ONE kind (the form decides the kind: images, a video or a Reel), with the rules of that kind
+ * only. A video or a Reel is a single file, so once it is chosen there is nothing more to add.
+ */
+export default function MediaPicker({ state, limits, kind, disabled, error }: {
+  state: MediaState; limits: ClientMediaLimits; kind: MediaKind; disabled?: boolean; error?: string | null;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const camera = useRef<HTMLInputElement>(null);
+  const { items } = state;
+  const full = kind === "image" ? items.filter((i) => i.status !== "error").length >= limits.imagesPerPost : items.some((i) => i.status !== "error");
+  const choose = (e: React.ChangeEvent<HTMLInputElement>) => { state.addFiles([...(e.target.files ?? [])], kind); e.target.value = ""; };
+  const help = kind === "image"
+    ? `Ảnh JPG, PNG hoặc GIF: tối đa ${limits.imagesPerPost} ảnh, mỗi ảnh ${formatMb(limits.imageBytes)}, tổng ${formatMb(limits.imagesTotalBytes)}.`
+    : kind === "video"
+      ? `Một video MP4 hoặc MOV, tối đa ${formatMb(limits.videoBytes)}.`
+      : `Một video MP4 hoặc MOV, tối đa ${formatMb(limits.reelBytes)}. Reels nên là video dọc 9:16, dài 3–90 giây.`;
 
   return <div className="field">
-    <span className="label" id="media-label">Ảnh hoặc video (không bắt buộc)</span>
+    <span className={`label${error ? " label-invalid" : ""}`} id="media-label">{TITLE[kind]} <span className="subtle">(bắt buộc)</span></span>
     <div className="media-grid" role="group" aria-labelledby="media-label">
       {items.map((item, index) => <figure key={item.key} className={`media-item${item.status === "error" ? " media-error" : ""}`}>
         {item.kind === "image"
@@ -159,25 +186,21 @@ export default function MediaPicker({ state, limits, disabled }: { state: MediaS
       </figure>)}
     </div>
 
-    {(["image", "video", "reel"] as const).map((k) => <input
-      key={k} ref={inputs[k]} type="file" accept={ACCEPT[k]} multiple={k === "image"} className="visually-hidden" tabIndex={-1} aria-hidden="true"
-      disabled={disabled} onChange={choose(k)}
-    />)}
-    <div className="actions">
-      {(kind === null || kind === "image") && <button type="button" className="btn" disabled={disabled || imagesFull} onClick={() => inputs.image.current?.click()}>
-        {kind === "image" ? "Thêm ảnh" : "Chọn ảnh"}
-      </button>}
-      {kind === null && <>
-        <button type="button" className="btn" disabled={disabled} onClick={() => inputs.video.current?.click()}>Chọn video</button>
-        <button type="button" className="btn" disabled={disabled} onClick={() => inputs.reel.current?.click()}>Chọn Reels</button>
-      </>}
-    </div>
-    <div className="subtle" id="media-help">
-      Ảnh JPG, PNG hoặc GIF: tối đa {limits.imagesPerPost} ảnh, mỗi ảnh {formatMb(limits.imageBytes)}, tổng {formatMb(limits.imagesTotalBytes)}.
-      {" "}Video MP4 hoặc MOV: tối đa {formatMb(limits.videoBytes)}; Reels tối đa {formatMb(limits.reelBytes)} (video dọc 9:16, dài 3–90 giây).
-      {" "}Một bài có ảnh hoặc đúng một video, và không đăng kèm liên kết.
-    </div>
-    {kind && kind !== "image" && <p className="notice" role="note">Video và Reels được đăng ở nền: Facebook cần vài phút để xử lý nên bài sẽ hiện “Facebook đang xử lý” trước khi lên Fanpage.</p>}
+    <input ref={input} type="file" accept={ACCEPT[kind]} multiple={kind === "image"} className="visually-hidden" tabIndex={-1} aria-hidden="true" disabled={disabled} onChange={choose} />
+    {/* Opens the camera of a phone straight away (the other one opens the gallery); only touch screens show the button for it. */}
+    <input ref={camera} type="file" accept={kind === "image" ? "image/*" : "video/*"} capture="environment" className="visually-hidden" tabIndex={-1} aria-hidden="true" disabled={disabled} onChange={choose} />
+    {items.length === 0
+      ? <button type="button" className={`media-drop${error ? " is-invalid" : ""}`} disabled={disabled} data-invalid={error ? "true" : undefined} aria-describedby={error ? "media-error" : "media-help"} onClick={() => input.current?.click()}>
+          <IconUpload /><strong>{CHOOSE[kind]}</strong><span className="subtle">{kind === "image" ? "Chọn một hoặc nhiều ảnh" : "Chọn một tệp"}</span>
+        </button>
+      : kind === "image" && <div className="actions">
+          <button type="button" className="btn" disabled={disabled || full} onClick={() => input.current?.click()}>Thêm ảnh</button>
+          <button type="button" className="btn media-camera" disabled={disabled || full} onClick={() => camera.current?.click()}>Chụp thêm ảnh</button>
+        </div>}
+    {items.length === 0 && <div className="actions media-camera"><button type="button" className="btn" disabled={disabled} onClick={() => camera.current?.click()}>{kind === "image" ? "Chụp ảnh bằng camera" : "Quay video bằng camera"}</button></div>}
+    <FieldError id="media" message={error} />
+    <div className="subtle" id="media-help">{help}</div>
+    {kind !== "image" && <p className="notice" role="note">Video và Reels được đăng ở nền: Facebook cần vài phút để xử lý nên bài sẽ hiện “Facebook đang xử lý” trước khi lên Fanpage.</p>}
     <div role="alert">{state.notice && <p className="error">{state.notice}</p>}</div>
   </div>;
 }

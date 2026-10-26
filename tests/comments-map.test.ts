@@ -8,7 +8,7 @@ describe("mapComment", () => {
       is_hidden: true, can_hide: true, can_remove: false, can_comment: false, parent: { id: "111_100" }, attachment: { type: "photo", url: "https://example.com/x.jpg" }
     })).toEqual({
       id: "111_222", message: "Hay quá", author: "Lan", createdTime: "2026-10-21T08:00:00.000Z", likeCount: 3, replyCount: 2, isHidden: true,
-      canHide: true, canRemove: false, canReply: false, parentId: "111_100", attachment: { type: "photo", url: "https://example.com/x.jpg" }
+      canHide: true, canRemove: false, canReply: false, byPage: false, likedByPage: null, parentId: "111_100", attachment: { type: "photo", url: "https://example.com/x.jpg" }
     });
   });
 

@@ -1,6 +1,8 @@
 import { one, rows, userDb } from "@/lib/db";
 import { FacebookActionError, runWithPageToken } from "@/lib/facebook-posts";
+import { countOwnComment } from "@/lib/new-comments";
 import { MetaApiError, metaDelete, metaGet, metaPost } from "@/lib/meta/client";
+import { VISITOR_POST_ID_PATTERN } from "@/lib/meta/guest";
 import {
   COMMENT_FIELDS_BASIC, COMMENT_FIELDS_FULL, COMMENT_ID_PATTERN, COMMENT_MAX_LENGTH, COMMENTS_PAGE_SIZE, mapComments,
   type CommentView, type GraphComment
@@ -11,8 +13,8 @@ import { COMMENT_MANAGE_SCOPES, COMMENT_READ_SCOPES, hasScopes } from "@/lib/met
 // signed-in user. Comment TEXT is only passed through to the screen: what is stored is a log of what the user did.
 
 export type CommentTarget = {
-  kind: "app" | "feed";
-  /** posts.id (kind app) or page_feed_posts.id (kind feed). */
+  kind: "app" | "feed" | "visitor";
+  /** posts.id (kind app), page_feed_posts.id (kind feed) or the Fanpage row (kind visitor: a visitor post is read live and has no row of its own). */
   id: string;
   pageRowId: string;
   facebookPageId: string;
@@ -21,16 +23,22 @@ export type CommentTarget = {
   access: { read: boolean; manage: boolean };
 };
 
-export type ResolveFailure = "POST_NOT_FOUND" | "COMMENTS_UNAVAILABLE" | "PAGE_REMOVED_ACTION" | "PAGE_INACTIVE" | "DB_ERROR";
+export type ResolveFailure = "INVALID_REQUEST" | "POST_NOT_FOUND" | "COMMENTS_UNAVAILABLE" | "PAGE_REMOVED_ACTION" | "PAGE_INACTIVE" | "DB_ERROR";
 
-/** The post and Page a comments request is about, checked to be the user's, live on Facebook, and on a usable Page. */
+/**
+ * The post and Page a comments request is about, checked to be the user's, live on Facebook, and on a usable Page.
+ * For kind "visitor", `id` is the Fanpage row and `facebookVisitorPostId` the visitor post ("<page id>_<post id>"), which must belong to that Fanpage.
+ */
 export async function resolveCommentTarget(
-  userId: string, kind: "app" | "feed", id: string
+  userId: string, kind: "app" | "feed" | "visitor", id: string, facebookVisitorPostId?: string
 ): Promise<{ ok: true; target: CommentTarget } | { ok: false; code: ResolveFailure }> {
   const db = userDb(userId);
   let pageRowId: string;
   let facebookPostId: string | null;
-  if (kind === "app") {
+  if (kind === "visitor") {
+    if (!facebookVisitorPostId || !VISITOR_POST_ID_PATTERN.test(facebookVisitorPostId)) return { ok: false, code: "INVALID_REQUEST" };
+    pageRowId = id; facebookPostId = facebookVisitorPostId;
+  } else if (kind === "app") {
     const { data, error } = await db.posts.select("id,page_id,status,facebook_post_id,facebook_deleted_at").eq("id", id).maybeSingle();
     if (error) return { ok: false, code: "DB_ERROR" };
     const post = one<{ page_id: string; status: string; facebook_post_id: string | null; facebook_deleted_at: string | null }>(data);
@@ -51,6 +59,8 @@ export async function resolveCommentTarget(
   if (pageError) return { ok: false, code: "DB_ERROR" };
   const page = one<{ id: string; page_id: string; connection_id: string; is_active: boolean; removed_at: string | null }>(pageData);
   if (!page) return { ok: false, code: "POST_NOT_FOUND" };
+  // A visitor post is named by the client: it must be a post of THIS Fanpage, not of any other.
+  if (kind === "visitor" && !facebookPostId.startsWith(`${page.page_id}_`)) return { ok: false, code: "INVALID_REQUEST" };
   if (page.removed_at) return { ok: false, code: "PAGE_REMOVED_ACTION" };
   if (!page.is_active) return { ok: false, code: "PAGE_INACTIVE" };
 
@@ -89,7 +99,7 @@ export async function listComments(userId: string, target: CommentTarget, opts: 
           order: opts.parentId ? "chronological" : "reverse_chronological", ...(opts.after ? { after: opts.after } : {})
         });
         return {
-          comments: mapComments(res.data),
+          comments: mapComments(res.data, target.facebookPageId),
           // `paging.next` carries the access token, so only the cursor goes back to the browser.
           next: res.paging?.next ? res.paging.cursors?.after ?? null : null,
           total: typeof res.summary?.total_count === "number" ? res.summary.total_count : null,
@@ -104,7 +114,9 @@ export async function listComments(userId: string, target: CommentTarget, opts: 
   });
 }
 
-export type CommentAction = "reply" | "hide" | "unhide" | "delete";
+/** Every action the log can hold: the CHECK on comment_actions.action in supabase/schema.sql must list exactly these. */
+export const COMMENT_ACTIONS = ["reply", "hide", "unhide", "delete", "like", "unlike", "edit"] as const;
+export type CommentAction = (typeof COMMENT_ACTIONS)[number];
 
 /** Writes the log of what the user did. Best effort like the post log: it never throws and never holds any text. */
 async function recordCommentAction(
@@ -113,7 +125,7 @@ async function recordCommentAction(
 ) {
   try {
     const { error } = await userDb(userId).commentActions.insert({
-      page_id: target.pageRowId, facebook_page_id: target.facebookPageId, post_kind: target.kind, post_ref: target.id,
+      page_id: target.pageRowId, facebook_page_id: target.facebookPageId, post_kind: target.kind, post_ref: target.kind === "visitor" ? null : target.id,
       facebook_post_id: target.facebookPostId, facebook_comment_id: commentId, action, result,
       error_code: extra.errorCode ?? null, result_comment_id: extra.resultCommentId ?? null
     });
@@ -154,9 +166,11 @@ export async function replyToComment(userId: string, target: CommentTarget, mess
   const objectId = replyTo ?? target.facebookPostId;
   const created = await act(userId, target, replyTo ?? target.facebookPostId, "reply", async (token) => {
     const res = await metaPost<{ id?: string }>(`${objectId}/comments`, token, { message: text });
-    if (!res.id) throw new FacebookActionError("FB_REJECTED");
+    if (!res.id) throw new FacebookActionError("COMMENT_REJECTED");
     return res as { id: string };
   }, (r) => r.id);
+  // A comment on the post itself raises Facebook's count: tell the stored count, or it would be announced as someone else's.
+  if (!replyTo && target.kind !== "visitor") await countOwnComment(userId, target.kind === "feed" ? { feedId: target.id } : { postId: target.id });
   return { id: created.id };
 }
 
@@ -164,7 +178,32 @@ export async function setCommentHidden(userId: string, target: CommentTarget, co
   if (!COMMENT_ID_PATTERN.test(commentId)) throw new FacebookActionError("INVALID_REQUEST");
   await act(userId, target, commentId, hidden ? "hide" : "unhide", async (token) => {
     const res = await metaPost<{ success?: boolean }>(commentId, token, { is_hidden: hidden ? "true" : "false" });
-    if (res?.success === false) throw new FacebookActionError("FB_REJECTED");
+    if (res?.success === false) throw new FacebookActionError("COMMENT_REJECTED");
+  });
+}
+
+/** Likes a comment as the Fanpage, or takes that like back. */
+export async function setCommentLiked(userId: string, target: CommentTarget, commentId: string, liked: boolean) {
+  if (!COMMENT_ID_PATTERN.test(commentId)) throw new FacebookActionError("INVALID_REQUEST");
+  await act(userId, target, commentId, liked ? "like" : "unlike", async (token) => {
+    const res = liked ? await metaPost<{ success?: boolean }>(`${commentId}/likes`, token, {}) : await metaDelete<{ success?: boolean }>(`${commentId}/likes`, token);
+    if (res?.success === false) throw new FacebookActionError("COMMENT_REJECTED");
+  });
+}
+
+/**
+ * Changes the text of a comment the Fanpage itself wrote. The author is checked with Facebook first, so the rule does not rest
+ * on the screen alone: somebody else's comment is refused before anything is changed.
+ */
+export async function editComment(userId: string, target: CommentTarget, commentId: string, message: string) {
+  const text = message.trim();
+  if (!text || text.length > COMMENT_MAX_LENGTH) throw new FacebookActionError("INVALID_REQUEST");
+  if (!COMMENT_ID_PATTERN.test(commentId)) throw new FacebookActionError("INVALID_REQUEST");
+  await act(userId, target, commentId, "edit", async (token) => {
+    const own = await metaGet<{ from?: { id?: string } }>(commentId, token, { fields: "from{id}" });
+    if (own.from?.id !== target.facebookPageId) throw new FacebookActionError("COMMENT_NOT_OWN");
+    const res = await metaPost<{ success?: boolean }>(commentId, token, { message: text });
+    if (res?.success === false) throw new FacebookActionError("COMMENT_REJECTED");
   });
 }
 
@@ -172,7 +211,7 @@ export async function deleteComment(userId: string, target: CommentTarget, comme
   if (!COMMENT_ID_PATTERN.test(commentId)) throw new FacebookActionError("INVALID_REQUEST");
   await act(userId, target, commentId, "delete", async (token) => {
     const res = await metaDelete<{ success?: boolean }>(commentId, token);
-    if (res?.success === false) throw new FacebookActionError("FB_REJECTED");
+    if (res?.success === false) throw new FacebookActionError("COMMENT_REJECTED");
   });
 }
 
